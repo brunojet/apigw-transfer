@@ -1,0 +1,102 @@
+# Contrato da API — gerado a partir deste template pelo Terraform
+# (templatefile em main.tf). Isso é o que "compete ao contrato": paths,
+# methods, integrações com o S3, mapeamento de headers/status e binary
+# media types. O Terraform só injeta os valores (região, bucket, role) e
+# gerencia o wrapper de infra (REST API, deployment, stage, IAM).
+#
+# Ref.: SPEC.md seção 4 (fluxo) e seção 5 (binary media types / teto de
+# payload). Sem mTLS/autorização nesta rodada (adiado — PLAN.md Fases 4-5).
+openapi: "3.0.1"
+info:
+  title: "${api_name}"
+  version: "1.0"
+paths:
+  "/{key+}":
+    get:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+        - name: "Range"
+          in: "header"
+          required: false
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "objeto completo"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+            ETag: { schema: { type: "string" } }
+        "206":
+          description: "chunk parcial (requisicao com Range)"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Content-Range: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+            ETag: { schema: { type: "string" } }
+      x-amazon-apigateway-integration:
+        type: "aws"
+        httpMethod: "GET"
+        uri: "arn:aws:apigateway:${aws_region}:s3:path/${bucket_name}/{key}"
+        credentials: "${execution_role_arn}"
+        passthroughBehavior: "when_no_match"
+        requestParameters:
+          integration.request.path.key: "method.request.path.key"
+          integration.request.header.Range: "method.request.header.Range"
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+              method.response.header.ETag: "integration.response.header.ETag"
+          "206":
+            statusCode: "206"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Content-Range: "integration.response.header.Content-Range"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+              method.response.header.ETag: "integration.response.header.ETag"
+    head:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "descoberta de tamanho (HeadObject)"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+            ETag: { schema: { type: "string" } }
+      x-amazon-apigateway-integration:
+        type: "aws"
+        httpMethod: "HEAD"
+        uri: "arn:aws:apigateway:${aws_region}:s3:path/${bucket_name}/{key}"
+        credentials: "${execution_role_arn}"
+        passthroughBehavior: "when_no_match"
+        requestParameters:
+          integration.request.path.key: "method.request.path.key"
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+              method.response.header.ETag: "integration.response.header.ETag"
+x-amazon-apigateway-binary-media-types:
+%{ for mt in binary_media_types ~}
+  - "${mt}"
+%{ endfor ~}

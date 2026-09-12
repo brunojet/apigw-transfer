@@ -160,6 +160,19 @@ no projeto `go-edge-cache` (referência completa em memória de projeto —
 backend de state em S3 (`brunojet-tfstate/apigw-transfer/terraform.tfstate`).
 Detalhes ficam no [PLAN.md](PLAN.md) (Fase 0); não repetidos aqui.
 
+**Extensão própria deste projeto (além do padrão do `go-edge-cache`):** o
+contrato da REST API (paths, methods, integrações, mapeamento de
+status/headers, `binaryMediaTypes`) fica separado em um documento OpenAPI
+(`terraform/modules/apigw_s3_proxy/openapi.yaml.tftpl`), renderizado via
+`templatefile()` e passado como `body` do `aws_api_gateway_rest_api`
+(`put_rest_api_mode = "overwrite"`). O Terraform (`main.tf` do módulo) fica
+só com o wrapper de infra: IAM role, a REST API em si, deployment e stage.
+Motivo: o `go-edge-cache` não tem esse problema (poucos recursos, sem REST
+API complexa); aqui, declarar cada `method`/`integration`/`*_response` em
+HCL puro escala mal à medida que a API cresce (mTLS, authorizer, novos
+paths) — um único contrato OpenAPI é mais legível e mais fácil de revisar
+como "isso é o que a API faz", independente de como ela é provisionada.
+
 ## 8. Questões em aberto
 
 Estas dependem de informação que só o time/banco pode fornecer — não foram
