@@ -126,6 +126,31 @@ paths:
               # (sera implementado numa rodada futura); aqui so validamos
               # que o mapeamento 404 -> 302 dispara com a key correta.
               method.response.header.Location: "'https://example.com/cache-miss-fetch-not-implemented-yet'"
+  "/fallback/{key+}":
+    get:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        uri: "${fallback_lambda_invoke_arn}"
+        passthroughBehavior: "when_no_match"
+    head:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        uri: "${fallback_lambda_invoke_arn}"
+        passthroughBehavior: "when_no_match"
 x-amazon-apigateway-binary-media-types:
 %{ for mt in binary_media_types ~}
   - "${mt}"

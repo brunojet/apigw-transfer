@@ -35,3 +35,6 @@ download.bin
 # Python
 __pycache__/
 *.pyc
+
+# Go build artifacts (scripts/build-lambda.sh regenera)
+/build/

@@ -40,6 +40,21 @@ variable "binary_media_types" {
   default     = []
 }
 
+variable "fallback_test_object_key" {
+  description = "Key de teste do fluxo de fallback -- liberada no proxy direto tambem, pra o cliente conseguir ler depois que a Lambda popular"
+  type        = string
+}
+
+variable "fallback_lambda_invoke_arn" {
+  description = "Invoke ARN da Lambda de fallback (aws_lambda_function.invoke_arn), usado no path /fallback/{key+}"
+  type        = string
+}
+
+variable "fallback_lambda_function_name" {
+  description = "Nome da Lambda de fallback, para o aws_lambda_permission"
+  type        = string
+}
+
 variable "tags" {
   description = "Tags aplicadas aos recursos"
   type        = map(string)

@@ -40,6 +40,42 @@ variable "binary_media_types" {
   default     = ["*/*"]
 }
 
+variable "origin_prefix" {
+  description = "Prefixo no bucket usado como origem simulada pela Lambda de fallback (mesmo bucket, ver memoria de projeto)"
+  type        = string
+  default     = "origin/"
+}
+
+variable "fallback_test_object_key" {
+  description = "Key de teste para o fluxo de fallback -- ausente na raiz, semeada em origin/ (ver docs/seed-fallback-test-object)"
+  type        = string
+  default     = "apigw-transfer-fallback-test.bin"
+}
+
+variable "fallback_lambda_function_name" {
+  description = "Nome da Lambda de fallback"
+  type        = string
+  default     = "apigw-transfer-dev-fallback"
+}
+
+variable "fallback_lambda_timeout" {
+  description = "Timeout da Lambda de fallback (segundos)"
+  type        = number
+  default     = 30
+}
+
+variable "fallback_lock_ttl_seconds" {
+  description = "TTL do lock distribuido (segundos)"
+  type        = number
+  default     = 20
+}
+
+variable "fallback_retry_after_seconds" {
+  description = "Segundos sugeridos ao cliente via Retry-After quando ja existe um fetch em andamento"
+  type        = number
+  default     = 5
+}
+
 variable "tags" {
   description = "Tags aplicadas aos recursos"
   type        = map(string)

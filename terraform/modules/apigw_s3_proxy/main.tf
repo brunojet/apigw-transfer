@@ -44,6 +44,7 @@ resource "aws_iam_role_policy" "apigw_s3" {
           # Key que nunca existe -- so pra provocar 404 real do S3 (em vez
           # de 403 por falta de permissao) e validar o mapeamento 404 -> 302.
           "${var.bucket_arn}/${var.missing_object_key}",
+          "${var.bucket_arn}/${var.fallback_test_object_key}",
         ]
       },
     ]
@@ -52,11 +53,12 @@ resource "aws_iam_role_policy" "apigw_s3" {
 
 locals {
   openapi_spec = templatefile("${path.module}/openapi.yaml.tftpl", {
-    api_name           = var.api_name
-    aws_region         = var.aws_region
-    bucket_name        = var.bucket_name
-    execution_role_arn = aws_iam_role.apigw_s3.arn
-    binary_media_types = var.binary_media_types
+    api_name                   = var.api_name
+    aws_region                 = var.aws_region
+    bucket_name                = var.bucket_name
+    execution_role_arn         = aws_iam_role.apigw_s3.arn
+    binary_media_types         = var.binary_media_types
+    fallback_lambda_invoke_arn = var.fallback_lambda_invoke_arn
   })
 }
 
@@ -84,4 +86,15 @@ resource "aws_api_gateway_stage" "this" {
   deployment_id = aws_api_gateway_deployment.this.id
   stage_name    = var.stage_name
   tags          = var.tags
+}
+
+# Permite que este REST API invoque a Lambda de fallback (GET/HEAD
+# /fallback/{key+} no OpenAPI). Sem isso o API Gateway recebe 403 do
+# proprio Lambda ao tentar invocar.
+resource "aws_lambda_permission" "fallback_invoke" {
+  statement_id  = "AllowAPIGatewayInvokeFallback"
+  action        = "lambda:InvokeFunction"
+  function_name = var.fallback_lambda_function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.this.execution_arn}/*/*"
 }

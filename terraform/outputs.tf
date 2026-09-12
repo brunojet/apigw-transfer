@@ -13,6 +13,16 @@ output "test_object_url" {
   value       = "${module.apigw_s3_proxy.invoke_url}/${var.test_object_key}"
 }
 
+output "fallback_test_object_url" {
+  description = "URL direta do objeto de teste do fallback (deve 404/302 ate a Lambda popular)"
+  value       = "${module.apigw_s3_proxy.invoke_url}/${var.fallback_test_object_key}"
+}
+
+output "fallback_endpoint_url" {
+  description = "URL do endpoint /fallback para o objeto de teste"
+  value       = "${module.apigw_s3_proxy.invoke_url}/fallback/${var.fallback_test_object_key}"
+}
+
 output "missing_object_url" {
   description = "URL de um objeto que nunca existe -- usada pra validar o mapeamento 404 -> 302"
   value       = "${module.apigw_s3_proxy.invoke_url}/${var.missing_object_key}"
