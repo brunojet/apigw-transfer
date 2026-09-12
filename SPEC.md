@@ -213,9 +213,16 @@ cliente decodifique `Content-Encoding` automaticamente, como fazem
 mas também não manda `Accept-Encoding: gzip` por padrão, então nem
 aciona a compressão nesse caso). Os motivos reais pra manter desabilitado
 são outros:
-- Os `binary_media_types` servidos (PDF, imagem, octet-stream, APK) já
-  são formatos comprimidos — gzip por cima não reduz quase nada, só
-  adiciona processamento sem ganho.
+- PDF e imagem já são formatos comprimidos de forma consistente — gzip
+  por cima não reduz quase nada, só adiciona processamento sem ganho.
+  APK é mais nuançado: é um ZIP, e algumas entradas (ex.: bibliotecas
+  nativas `.so`, quando o build usa `extractNativeLibs=false`, ou
+  assets marcados `noCompress`) são armazenadas com `STORE` (sem
+  compressão) de propósito, pra permitir `mmap` direto — nesses trechos
+  específicos gzip até compensaria. Mas isso é opaco pro proxy (não
+  inspecionamos a estrutura interna do zip, só repassamos bytes brutos
+  do S3) — não dá pra decidir compressão por trecho, só pra API inteira,
+  e o motivo abaixo pesa mais que esse ganho parcial e imprevisível.
 - Depende de **toda** lib de cliente decodificar `Content-Encoding`
   corretamente. Um cliente com implementação HTTP mínima que manda
   `Accept-Encoding: gzip` mas não decodifica sozinho receberia bytes
