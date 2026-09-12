@@ -76,27 +76,20 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
         time.sleep(retry_after)
 
 
-def ensure_available(direct_url: str, verbose: bool) -> str:
-    """Garante que o objeto existe, deixando o urllib seguir os redirects
-    sozinho (path direto -> fallback -> path direto, numa chamada só) e
-    request() tratar o 202 por baixo dos panos. Retorna direct_url (é
-    sempre a URL final, já que o fallback redireciona de volta pra ela).
-    Levanta RuntimeError em erro permanente (404 na origem)."""
-    status, _, body = request(direct_url, "HEAD", verbose)
+def head(url: str, verbose: bool) -> int:
+    """Único HEAD: descobre o tamanho e, de quebra, resolve a
+    disponibilidade -- não precisa de uma etapa separada pra isso. O
+    urllib já seguiu os redirects sozinho (path direto -> fallback ->
+    path direto) e request() já absorveu qualquer 202 no caminho; aqui só
+    sobra checar 200 vs 404 (permanente) vs algo inesperado."""
+    status, headers, body = request(url, "HEAD", verbose)
     if status == 200:
-        return direct_url
+        size = int(headers.get("Content-Length", "0"))
+        print(f"HEAD -> {status} Content-Length={size}")
+        return size
     if status == 404:
         raise RuntimeError(f"objeto não existe nem na origem (404 permanente): {body[:300]!r}")
-    raise RuntimeError(f"status inesperado ao garantir disponibilidade: {status} body={body[:300]!r}")
-
-
-def head(url: str, verbose: bool) -> int:
-    status, headers, _ = request(url, "HEAD", verbose)
-    if status != 200:
-        raise RuntimeError(f"HEAD final retornou {status}, esperado 200")
-    size = int(headers.get("Content-Length", "0"))
-    print(f"HEAD -> {status} Content-Length={size}")
-    return size
+    raise RuntimeError(f"HEAD retornou status inesperado: {status} body={body[:300]!r}")
 
 
 def get_range(url: str, start: int, end: int, retries: int, retry_delay: float, verbose: bool):
@@ -113,8 +106,6 @@ def get_range(url: str, start: int, end: int, retries: int, retry_delay: float, 
 
 
 def download(url: str, out_path: str, chunk_size: int, retries: int, retry_delay: float, verbose: bool):
-    url = ensure_available(url, verbose)
-
     total = head(url, verbose)
     if total == 0:
         print("Content-Length veio 0/ausente — abortando.")
