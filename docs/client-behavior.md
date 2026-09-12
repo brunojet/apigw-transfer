@@ -166,7 +166,42 @@ flowchart TD
 | `412` num chunk | Erro **permanente pro download em andamento** — o objeto mudou de versão no meio do processo. Não adianta retentar o mesmo chunk; é preciso descartar o que já foi baixado e recomeçar do zero com a versão atual (novo `HEAD`, novo `ETag`). |
 | Retomar download interrompido | Guardar o `ETag` junto com o arquivo parcial (ex.: sidecar `<arquivo>.etag`). Ao retomar: fazer `HEAD` de novo — se o `ETag` bater com o salvo, continuar do byte onde parou (`Range` começando do tamanho atual do arquivo local); se não bater, descartar o parcial e recomeçar do zero. |
 
-## 7. Limites conhecidos (não normativo, mas relevante pro cliente)
+## 7. Recomendações de implementação (não normativo, mas validado na prática)
+
+A referência completa dessas recomendações é [scripts/download_range.py](../scripts/download_range.py)
+— cliente funcional só com stdlib que implementa o contrato inteiro deste
+documento e foi validado ponta a ponta contra AWS real (caminho feliz,
+cache-miss, concorrência, `412`, retomada).
+
+- **Use uma biblioteca HTTP que siga redirects automaticamente.** Não
+  implemente resolução manual de `Location` — desde que o servidor monte
+  o `Location` já resolvido (ver §1, §3), qualquer cliente HTTP padrão
+  que segue `302` sozinho (`curl -L`, browsers, `urllib`/`requests` em
+  Python, `net/http` em Go com `CheckRedirect` padrão, etc.) atravessa a
+  cadeia inteira `/{key} → /fallback/{key} → /{key}` sem lógica extra.
+- **Confirme que a lib preserva os headers da requisição original ao
+  seguir o redirect.** A cadeia de cache-miss passa pelo mesmo host, mas
+  o cliente precisa continuar mandando `Range`/`If-Match` na requisição
+  final — a maioria das libs preserva headers customizados em redirects
+  `GET`/`HEAD` para o mesmo host, mas isso não é universal entre
+  linguagens/bibliotecas; valide esse comportamento explicitamente antes
+  de confiar nele.
+- **Trate `202` como um caso à parte do redirect, não como um redirect.**
+  Não é `Location` pra seguir — é "espere `Retry-After` e repita a
+  *mesma* requisição". Isolar isso num wrapper genérico (como
+  `request()` em `download_range.py`) evita duplicar a lógica em cada
+  call site e mantém o retry de cache-miss desacoplado do retry de chunk
+  (que é sobre erro transitório tipo `500`, uma preocupação diferente).
+- **Trate `412` como erro terminal no ponto onde é detectado**, não como
+  um valor de retorno comum que quem chama precisa lembrar de checar —
+  levantar a exceção ali mesmo (em vez de devolver o status e confiar
+  numa checagem externa) evita que um refactor futuro esqueça o caso e
+  acabe concatenando bytes de duas versões diferentes do objeto.
+- **Imponha um teto de tempo/tentativas total para o cache-miss**, não só
+  por chunk — sem isso, um `202` que nunca resolve (lock preso, Lambda
+  com erro recorrente) faz o cliente fazer polling pra sempre.
+
+## 8. Limites conhecidos (não normativo, mas relevante pro cliente)
 
 - O teto de payload do API Gateway é **rígido**: ultrapassar causa falha
   abrupta (não é "entrega parcial e avisa"). Por isso o chunk de 8 MiB é
