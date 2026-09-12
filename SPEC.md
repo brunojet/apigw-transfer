@@ -24,20 +24,30 @@ autenticação/autorização, que já é custo aceito e existente.
 > banco" descreve a autenticação na borda (mTLS de client certificate +
 > validação de um token emitido pelo banco). Os detalhes exatos de como
 > esse token é validado (formato, emissor, TTL) não foram especificados
-> ainda — ver seção 7 (Questões em aberto).
+> ainda — ver seção 8 (Questões em aberto).
 
 ## 2. Escopo
 
-**Dentro do escopo:**
+**Dentro do escopo (rodada atual):**
 - Leitura (download) de um objeto S3 já existente, em ranges de bytes.
-- Descoberta do tamanho total do objeto (equivalente a `HeadObject`).
-- Autenticação mTLS + validação de token na borda do API Gateway.
+- Descoberta do tamanho total do objeto (equivalente a `HeadObject`), via
+  `HEAD` feito pelo cliente.
+- Cliente solicitando `HEAD` (tamanho) e depois `GET`s com `Range` (chunks)
+  contra o endpoint do API Gateway — **este é o objetivo principal desta
+  rodada**: validar a mecânica do proxy (API Gateway → S3 Service Proxy)
+  de ponta a ponta, sem autenticação na borda ainda.
 - Validação prática dos limites de payload do API Gateway (10 MB de
   resposta, sem truncamento gracioso — ver seção 5) usando o mesmo objeto
   de teste de ~109 MB já usado na PoC do `go-infra-adapters`
   (`s3://brunojet-media-proxy-dev/servicenow-zurich-platform-security-ptbr.pdf`).
 
 **Fora do escopo (por ora):**
+- **mTLS e validação de token do banco.** Adiados para uma rodada
+  seguinte (PLAN.md Fases 4 e 5) — decisão explícita do usuário. O
+  endpoint desta rodada roda **sem nenhuma autenticação na borda**; a
+  seção 1 (Motivação) e o restante deste documento descrevem o *padrão
+  aprovado* de destino (mTLS + token), mas ele não faz parte do que está
+  sendo testado agora.
 - Upload de arquivos (`PutObject`) através do gateway.
 - Cache do lado do gateway/CDN (o S3 já é a fonte da verdade; sem camada
   de cache adicional nesta PoC).
@@ -50,18 +60,38 @@ autenticação/autorização, que já é custo aceito e existente.
 
 | Componente | Serviço AWS | Responsabilidade |
 | :---- | :---- | :---- |
-| Ponto de entrada | API Gateway (REST API) | Recebe requisição, valida mTLS + token, repassa pro S3 |
+| Ponto de entrada | API Gateway (REST API) | Recebe requisição e repassa pro S3 (sem auth na borda nesta rodada — ver seção 2) |
 | Integração | AWS Service Proxy (não-Lambda) | Traduz a requisição HTTP em `GetObject`/`HeadObject` no S3, repassando `Range` |
-| Armazenamento | Amazon S3 (privado) | Fonte dos arquivos; sem acesso público |
-| Autenticação de transporte | mTLS (custom domain + truststore) | Garante que só clientes com certificado válido cheguem à API |
-| Autorização | Token do banco (mecanismo a confirmar — seção 7) | Garante que o chamador está autorizado a esse arquivo |
-| Permissão de acesso ao S3 | IAM Role de execução do API Gateway | `s3:GetObject` escopado ao(s) bucket(s) da PoC |
+| Armazenamento | Amazon S3 (privado) | Bucket já existente `brunojet-media-proxy-dev` (`arn:aws:s3:::brunojet-media-proxy-dev`), reaproveitado do PoC do `go-infra-adapters`/`media-proxy` — sem criação de bucket novo |
+| Autenticação de transporte *(adiado)* | mTLS (custom domain + truststore) | Padrão de destino aprovado — fora do escopo desta rodada (PLAN.md Fase 4) |
+| Autorização *(adiado)* | Token do banco (mecanismo a confirmar — seção 8) | Padrão de destino aprovado — fora do escopo desta rodada (PLAN.md Fase 5) |
+| Permissão de acesso ao S3 | IAM Role de execução do API Gateway | `s3:GetObject`/`s3:HeadObject` escopado ao objeto de teste no bucket reaproveitado (não ao prefixo `/cdn` usado pelo `media-proxy`) |
 
 Diferença chave em relação ao `media-proxy` atual: **não há Lambda nem
 cache intermediário no caminho do binário** — o API Gateway fala
 diretamente com o S3 para cada requisição.
 
 ## 4. Fluxo de requisição
+
+Fluxo testado nesta rodada (sem mTLS/token — ver seção 2):
+
+```
+Cliente
+  ▼
+API Gateway (endpoint padrão, sem auth na borda)
+  ▼
+Integração AWS Service Proxy → S3
+  │  1. HEAD /{bucket}/{key}          → tamanho total do objeto
+  │  2. GET /{bucket}/{key}, Range: bytes=X-Y  → chunk pedido
+  ▼
+S3 responde 206 Partial Content + Content-Range
+  ▼
+API Gateway repassa a resposta ao cliente (binário, sem base64 se
+binary media types estiver configurado)
+```
+
+Fluxo de destino (produção, com mTLS + token — PLAN.md Fases 4-5, fora do
+escopo desta rodada):
 
 ```
 Cliente
@@ -77,8 +107,7 @@ Integração AWS Service Proxy → S3
   ▼
 S3 responde 206 Partial Content + Content-Range
   ▼
-API Gateway repassa a resposta ao cliente (binário, sem base64 se
-binary media types estiver configurado)
+API Gateway repassa a resposta ao cliente
 ```
 
 O cliente é responsável por:
@@ -121,7 +150,17 @@ binary media types configurados, para confirmar o teto efetivo na prática.
 | CloudFront Signed URLs (padrão do `media-proxy`) | ❌ Não é o padrão aceito pelo conglomerado para exposição de arquivos privados — mantido apenas como referência de arquitetura alternativa |
 | Multi-range por requisição | ❌ Não suportado pelo S3; cada range é uma requisição HTTP separada |
 
-## 7. Questões em aberto
+## 7. Padrão de infraestrutura (Terraform)
+
+O scaffold do `terraform/` desta PoC segue o mesmo padrão de IaC já validado
+no projeto `go-edge-cache` (referência completa em memória de projeto —
+`infra_pattern_go_edge_cache.md`): módulo raiz (`main.tf`/`variables.tf`/
+`outputs.tf`/`backend.tf`) + `terraform/modules/<concern>/` por serviço +
+`env/<dev|staging|prod>/terraform.tfvars` commitados (sem segredos) +
+backend de state em S3 (`brunojet-tfstate/apigw-transfer/terraform.tfstate`).
+Detalhes ficam no [PLAN.md](PLAN.md) (Fase 0); não repetidos aqui.
+
+## 8. Questões em aberto
 
 Estas dependem de informação que só o time/banco pode fornecer — não foram
 assumidas neste documento:

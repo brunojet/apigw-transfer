@@ -1,0 +1,14 @@
+output "rest_api_id" {
+  description = "ID da REST API criada no API Gateway"
+  value       = module.apigw_s3_proxy.rest_api_id
+}
+
+output "invoke_url" {
+  description = "Base URL do stage de deploy"
+  value       = module.apigw_s3_proxy.invoke_url
+}
+
+output "test_object_url" {
+  description = "URL completa para baixar o objeto de teste (HEAD/GET com Range)"
+  value       = "${module.apigw_s3_proxy.invoke_url}/${var.test_object_key}"
+}
