@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Baixa um objeto do apigw-transfer em blocos: HEAD (tamanho) + GET com
 Range por bloco. Segue o contrato completo do cliente (ver
-docs/client-behavior.md): se o path direto responder 404/302, segue o
-Location (já vem totalmente resolvido pelo servidor, monta dinamicamente
-via VTL -- ver módulo apigw_s3_proxy) até /fallback/{key}, trata
-202 + Retry-After (espera e repete) até o fallback responder 302, e só
-então baixa o conteúdo de verdade. Só stdlib (urllib), sem dependencias.
+docs/client-behavior.md): o Location do 404 já vem 100% resolvido pelo
+servidor (monta a key real via VTL -- ver módulo apigw_s3_proxy), então
+o cliente só precisa seguir redirect normalmente -- usa o auto-follow
+padrão do urllib (path direto -> 302 -> /fallback/{key} -> 302 -> path
+direto, tudo numa chamada só). Só o 202 (lock ocupado no fallback)
+precisa de tratamento manual, porque não é um redirect -- trata
+Retry-After e tenta de novo. Só stdlib (urllib), sem dependencias.
 
 Uso:
     python scripts/download_range.py [url] [-o saida.bin] [-c BYTES] [-r N] [-v]
@@ -29,27 +31,15 @@ TEST_URL = "https://7d3q1z0cw9.execute-api.us-east-1.amazonaws.com/dev/serviceno
 MAX_FALLBACK_WAIT_SECONDS = 120
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """urlopen() segue 301/302/303/307 automaticamente por padrao -- aqui
-    a gente quer inspecionar cada 302 manualmente (o 202 do fallback, por
-    exemplo, nao e' um redirect e precisa do proprio tratamento de
-    Retry-After), entao desabilita o auto-follow e decide explicitamente
-    em ensure_available()."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_opener = urllib.request.build_opener(_NoRedirect)
-
-
 def request(url: str, method: str, verbose: bool, headers: dict = None):
     """Faz a requisicao e retorna (status, headers, body) sem levantar em
-    4xx/5xx. Nao segue redirect automaticamente -- ver _NoRedirect acima."""
+    4xx/5xx. Segue redirect automaticamente (comportamento padrao do
+    urllib) -- o Location do servidor ja vem resolvido, entao isso e'
+    seguro (ver docstring do modulo)."""
     req = urllib.request.Request(url, method=method, headers=headers or {})
     t0 = time.time()
     try:
-        with _opener.open(req) as resp:
+        with urllib.request.urlopen(req) as resp:
             body = resp.read()
             resp_headers = dict(resp.headers)
             status = resp.status
@@ -64,37 +54,18 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
 
 
 def ensure_available(direct_url: str, verbose: bool) -> str:
-    """Garante que o objeto existe no path direto, acionando o fallback se
-    preciso. Retorna a URL final (pode ser a mesma direct_url) pronta pra
-    HEAD/GET normal. Levanta RuntimeError em erro permanente (404 na origem)
-    ou se o teto de espera (MAX_FALLBACK_WAIT_SECONDS) estourar."""
-    parts = urllib.parse.urlsplit(direct_url)
-    origin = f"{parts.scheme}://{parts.netloc}"
-
-    status, headers, _ = request(direct_url, "HEAD", verbose)
-    if status == 200:
-        return direct_url
-    if status not in (302, 404):
-        raise RuntimeError(f"HEAD inicial retornou status inesperado: {status}")
-
-    location = headers.get("Location")
-    if not location:
-        raise RuntimeError(f"status {status} sem header Location -- não sei montar o fallback")
-
-    # Location já vem resolvido (a key real, não um template) -- o
-    # servidor monta isso via VTL (ver módulo apigw_s3_proxy).
-    fallback_url = origin + location
-    print(f"Objeto ausente no path direto -- acionando fallback: {fallback_url}")
-
+    """Garante que o objeto existe, deixando o urllib seguir os redirects
+    sozinho (path direto -> fallback -> path direto, numa chamada só).
+    Só trata manualmente o 202 (lock ocupado no fallback -- não é um
+    redirect, precisa esperar Retry-After e tentar tudo de novo do zero).
+    Retorna direct_url (é sempre a URL final, já que o fallback redireciona
+    de volta pra ela). Levanta RuntimeError em erro permanente (404 na
+    origem) ou se o teto de espera (MAX_FALLBACK_WAIT_SECONDS) estourar."""
     deadline = time.time() + MAX_FALLBACK_WAIT_SECONDS
     while True:
-        status, headers, body = request(fallback_url, "GET", verbose)
-        if status == 302:
-            final_location = headers.get("Location")
-            if not final_location:
-                raise RuntimeError("fallback retornou 302 sem Location")
-            print(f"Fallback concluiu -- objeto populado em {final_location}")
-            return origin + final_location
+        status, headers, body = request(direct_url, "HEAD", verbose)
+        if status == 200:
+            return direct_url
         if status == 202:
             retry_after = int(headers.get("Retry-After", "5"))
             if time.time() + retry_after > deadline:
@@ -105,9 +76,8 @@ def ensure_available(direct_url: str, verbose: bool) -> str:
             time.sleep(retry_after)
             continue
         if status == 404:
-            detail = body[:300]
-            raise RuntimeError(f"objeto não existe nem na origem (404 permanente): {detail!r}")
-        raise RuntimeError(f"fallback retornou status inesperado: {status} body={body[:300]!r}")
+            raise RuntimeError(f"objeto não existe nem na origem (404 permanente): {body[:300]!r}")
+        raise RuntimeError(f"status inesperado ao garantir disponibilidade: {status} body={body[:300]!r}")
 
 
 def head(url: str, verbose: bool) -> int:
