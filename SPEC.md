@@ -196,23 +196,34 @@ histórico completo do diagnóstico.
 **Achado adicional — compressão (gzip) do API Gateway, deliberadamente
 desabilitada:** o atributo `minimum_compression_size` do
 `aws_api_gateway_rest_api` não está configurado neste projeto (não é
-"esquecido", é intencional). `Content-Encoding: gzip` é uma
-transformação **por mensagem HTTP**, revertida inteiramente entre
-servidor e cliente antes da aplicação ver o corpo — então não é verdade
-que bytes gzip de chunks diferentes precisariam ser concatenados
-comprimidos; cada bloco chega descomprimido de volta ao byte-range
-exato antes de ser gravado no arquivo. Precisão importante aqui:
-`Content-Length` descreve o tamanho do que é **transmitido** naquela
-mensagem (encolheria com compressão), enquanto `Content-Range` sempre
-descreve a posição no **arquivo original**, sem relação com o que
-trafegou — são dois campos independentes, e é por isso que a
-reconciliação funciona: a descompressão desfaz o que `Content-Length`
-media, e o resultado bate com o que `Content-Range` prometeu (contanto que a lib HTTP do
-cliente decodifique `Content-Encoding` automaticamente, como fazem
-`requests`, `OkHttp` e browsers — `urllib` puro não decodifica sozinho,
-mas também não manda `Accept-Encoding: gzip` por padrão, então nem
-aciona a compressão nesse caso). Os motivos reais pra manter desabilitado
-são outros:
+"esquecido", é intencional). `Range`/`Content-Encoding` operam em
+**camadas diferentes e independentes**, e é importante isolar isso pra
+não confundir os dois:
+
+- **Camada do range (seleção):** decide *quais bytes* do objeto
+  original (tal como armazenado no S3) fazem parte desta resposta. É
+  resolvida no `GetObject`, antes de qualquer coisa relacionada a
+  transporte. `Content-Range: bytes X-Y/Z` descreve sempre essa posição
+  no arquivo original — nunca muda, com ou sem compressão.
+- **Camada de transporte (codificação):** decide *como* os bytes já
+  selecionados pela camada acima trafegam na rede entre servidor e
+  cliente. `Content-Encoding: gzip`, se estivesse ativo, comprimiria só
+  essa transmissão — é revertido inteiramente pelo cliente antes da
+  aplicação ver o corpo. `Content-Length` pertence a essa camada:
+  descreve o tamanho do que foi **transmitido** (encolheria com
+  compressão), não o tamanho do range em si.
+
+Como as duas camadas são independentes, elas nunca competem: a seleção
+de bytes já aconteceu antes da compressão entrar em cena, e a
+descompressão desfaz a camada de transporte antes da aplicação
+concatenar os blocos — não existe cenário de "bytes gzip de chunks
+diferentes que precisariam ser concatenados comprimidos" (contanto que a
+lib HTTP do cliente decodifique `Content-Encoding` automaticamente, como
+fazem `requests`, `OkHttp` e browsers — `urllib` puro não decodifica
+sozinho, mas também não manda `Accept-Encoding: gzip` por padrão, então
+nem aciona a compressão nesse caso).
+
+Os motivos reais pra manter desabilitado são outros:
 - PDF e imagem já são formatos comprimidos de forma consistente — gzip
   por cima não reduz quase nada, só adiciona processamento sem ganho.
   APK é mais nuançado: é um ZIP, e algumas entradas (ex.: bibliotecas
