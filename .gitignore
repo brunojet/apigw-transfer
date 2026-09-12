@@ -38,3 +38,4 @@ __pycache__/
 
 # Go build artifacts (scripts/build-lambda.sh regenera)
 /build/
+*.exe
