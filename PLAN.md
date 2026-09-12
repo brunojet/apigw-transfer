@@ -5,11 +5,15 @@ algo verificável antes de avançar para a próxima; as questões em aberto da
 seção 8 do spec devem ser resolvidas antes das fases que dependem delas
 (marcado abaixo).
 
-**Foco da rodada atual: Fases 0–3.** O objetivo imediato é validar um
+**Foco da rodada atual: Fases 0–3.5.** O objetivo imediato era validar um
 cliente fazendo `HEAD` (tamanho do objeto) seguido de `GET`s com `Range`
 (chunks) contra o endpoint do API Gateway, sem mTLS e sem autorização —
-decisão explícita do usuário. Fases 4 (mTLS) e 5 (token do banco) ficam
-adiadas para uma rodada seguinte.
+decisão explícita do usuário. Na prática, validar isso de ponta a ponta
+puxou naturalmente mais duas coisas que fazem parte de qualquer cliente
+de download real: o que fazer quando o objeto ainda não existe
+(cache-miss) e como garantir que o arquivo baixado em chunks está
+consistente — isso virou a Fase 3.5, abaixo. Fases 4 (mTLS) e 5 (token do
+banco) seguem adiadas para uma rodada seguinte.
 
 ## Fase 0 — Scaffold do repositório
 
@@ -75,6 +79,9 @@ acessível via data source.
 **Critério de conclusão:** `curl` com `Range` manual contra o endpoint do
 API Gateway devolve o chunk esperado com `Content-Range` correto.
 
+**Concluído.** Validado com `curl -L` (segue o redirect de cache-miss
+transparentemente) e com o script `scripts/download_range.py`.
+
 ## Fase 3 — Validar o teto de payload na prática
 
 - Repetir o download do objeto de ~109 MB em chunks de 8 MB (mesma lógica
@@ -92,6 +99,51 @@ API Gateway devolve o chunk esperado com `Content-Range` correto.
 por chunk para essa integração, e download completo do objeto de teste
 reconstruído byte-a-byte igual ao original (comparação de tamanho e,
 idealmente, checksum).
+
+**Concluído.** Chunk de 8 MiB confirmado como o valor que funciona de
+ponta a ponta (SPEC.md §5); `binary_media_types` como atributo nativo do
+Terraform (não extensão OpenAPI) restrito aos content-types reais —
+necessário não só pelo teto de payload, mas porque o coringa `["*/*"]`
+também quebra o VTL usado no redirect dinâmico da Fase 3.5 (ver SPEC.md
+§5). Download do objeto de ~109 MB reconstruído com checksum SHA-256
+idêntico ao original, via `scripts/download_range.py`.
+
+## Fase 3.5 — Cache-miss (fallback) e consistência do download
+
+Não estava no plano original, mas emergiu diretamente da Fase 2/3: testar
+o cliente de ponta a ponta exige responder "o que acontece se o objeto
+não existir ainda" e "como sei que os chunks que concatenei formam o
+arquivo certo". Ambos resolvidos sem adicionar compute no caminho de um
+objeto já populado:
+
+- **Cache-miss:** `404` no path direto vira `302` com `Location`
+  dinamicamente resolvido (VTL, sem Lambda — SPEC.md §4/§7) apontando
+  pra `/fallback/{key}`, servido por uma Lambda (`cmd/fallback`,
+  módulo `terraform/modules/fallback_lambda/`) que busca em
+  `origin/{key}` (origem simulada no mesmo bucket), popula o path
+  direto, e redireciona de volta.
+- **Concorrência:** lock não-bloqueante no S3 — quem perde a corrida
+  recebe `202` + `Retry-After` em vez do Lambda ficar esperando; erros
+  de lock que não são "já existe" (ex.: `AccessDenied` por IAM) surgem
+  como erro real, não como retry silencioso (`IsLockHeld` em
+  `go-infra-adapters`).
+- **Consistência entre chunks:** `If-Match`/`ETag` — S3 responde `412`
+  se o objeto mudou de versão no meio do download; mapeado
+  explicitamente no contrato OpenAPI (sem cair no `default` como
+  `200`).
+- **Retomada de download interrompido:** cliente grava o `ETag` num
+  sidecar (`<arquivo>.etag`); se retomar e o `ETag` bater, continua do
+  byte onde parou em vez de recomeçar do zero.
+
+Contrato completo do cliente (diagramas de sequência/fluxo, tabela
+normativa) em [docs/client-behavior.md](docs/client-behavior.md).
+
+**Critério de conclusão:** download completo (caminho feliz), download
+com cache-miss (fallback aciona, popula, redireciona de volta),
+concorrência (dois clientes pedindo a mesma key, um recebe 202), objeto
+mudando de versão no meio do download (412, cliente aborta), e retomada
+de download truncado — todos validados contra AWS real, com checksum
+SHA-256 confirmado no resultado final.
 
 ## Fase 4 — mTLS *(adiada — fora do escopo desta rodada; também bloqueada por SPEC.md §8 — emissão da CA)*
 
@@ -132,14 +184,14 @@ funcionando de ponta a ponta.
 ## Ordem de dependências
 
 ```
-Fase 0 ──► Fase 1 ──► Fase 2 ──► Fase 3
-                                    │
-                    (paralelo, após Fase 2, se as
+Fase 0 ──► Fase 1 ──► Fase 2 ──► Fase 3 ──► Fase 3.5
+                                                │
+                    (paralelo, após Fase 3.5, se as
                      respostas da SPEC §8 chegarem antes)
-                                    │
+                                                │
                     Fase 4 ──► Fase 5 ──► Fase 6
 ```
 
-Fases 2 e 3 não dependem de nenhuma questão em aberto e podem começar
-imediatamente. Fases 4 e 5 estão explicitamente bloqueadas até as
-respostas da seção 8 do `SPEC.md`.
+Fases 2, 3 e 3.5 não dependem de nenhuma questão em aberto e já foram
+concluídas. Fases 4 e 5 estão explicitamente bloqueadas até as respostas
+da seção 8 do `SPEC.md`.

@@ -40,6 +40,19 @@ autenticação/autorização, que já é custo aceito e existente.
   resposta, sem truncamento gracioso — ver seção 5) usando o mesmo objeto
   de teste de ~109 MB já usado na PoC do `go-infra-adapters`
   (`s3://brunojet-media-proxy-dev/servicenow-zurich-platform-security-ptbr.pdf`).
+- **Cache-miss com fallback para uma origem simulada:** se o objeto não
+  existir ainda no path direto, o servidor responde `302` com um
+  `Location` dinâmico (montado via VTL, sem Lambda no caminho de dados
+  ainda) apontando para `/fallback/{key}`; esse endpoint (agora sim, com
+  Lambda) busca o objeto de um prefixo `origin/` no mesmo bucket, copia
+  pro path direto e redireciona de volta — simula uma origem real sem
+  provisionar infraestrutura extra. Ver detalhes em
+  [docs/client-behavior.md](docs/client-behavior.md).
+- **Consistência entre chunks e retomada de download interrompido:** o
+  cliente usa `If-Match`/`ETag` pra garantir que todos os chunks vêm da
+  mesma versão do objeto (o S3 responde `412` se o objeto mudou no meio
+  do download), e grava o `ETag` num sidecar pra poder retomar um
+  download parcial em vez de recomeçar do zero.
 
 **Fora do escopo (por ora):**
 - **mTLS e validação de token do banco.** Adiados para uma rodada
@@ -66,6 +79,8 @@ autenticação/autorização, que já é custo aceito e existente.
 | Autenticação de transporte *(adiado)* | mTLS (custom domain + truststore) | Padrão de destino aprovado — fora do escopo desta rodada (PLAN.md Fase 4) |
 | Autorização *(adiado)* | Token do banco (mecanismo a confirmar — seção 8) | Padrão de destino aprovado — fora do escopo desta rodada (PLAN.md Fase 5) |
 | Permissão de acesso ao S3 | IAM Role de execução do API Gateway | `s3:GetObject`/`s3:HeadObject` escopado ao objeto de teste no bucket reaproveitado (não ao prefixo `/cdn` usado pelo `media-proxy`) |
+| Cache-miss (fallback) | AWS Lambda (`cmd/fallback`) | Só entra em ação quando o objeto ainda não existe no path direto: busca em `origin/{key}` (origem simulada no mesmo bucket), copia pro path direto e redireciona de volta — não fica no caminho de dados de um objeto já populado |
+| Origem simulada | Amazon S3 (mesmo bucket, prefixo `origin/`) | Substitui uma origem externa real pra fins de PoC — sem provisionar infraestrutura adicional |
 
 Diferença chave em relação ao `media-proxy` atual: **não há Lambda nem
 cache intermediário no caminho do binário** — o API Gateway fala
@@ -89,6 +104,27 @@ S3 responde 206 Partial Content + Content-Range
 API Gateway repassa a resposta ao cliente (binário, sem base64 se
 binary media types estiver configurado)
 ```
+
+**Cache-miss (objeto ainda não existe no path direto):** o `HEAD`/`GET`
+inicial responde `404` do S3, e o API Gateway converte isso em `302` com
+um `Location` **já resolvido com a key real** (montado via VTL —
+`$context.responseOverride.header.Location`, ver §7) apontando para
+`/fallback/{key}`. Esse segundo endpoint é servido por uma Lambda
+(`cmd/fallback`) que busca o objeto em `origin/{key}` (origem simulada no
+mesmo bucket), copia pro path direto, e responde outro `302` de volta pro
+path original — que agora responde `200`/`206` normalmente. Concorrência
+é tratada com um lock não-bloqueante no S3: quem chega e encontra o lock
+já tomado recebe `202 Accepted` + `Retry-After` em vez de esperar (ver
+§6). Diagramas de sequência completos (caminho feliz, cache-miss,
+concorrência) e a tabela normativa de comportamento do cliente estão em
+[docs/client-behavior.md](docs/client-behavior.md) — não repetidos aqui.
+
+**Consistência entre chunks:** o cliente envia `If-Match: <etag>` (do
+`HEAD` inicial) em todo `GET` com `Range`; se o objeto mudar de versão no
+meio do download, o S3 responde `412 Precondition Failed` e o servidor
+repassa isso sem mascarar como `200` — o cliente trata como erro
+permanente pro download em andamento (recomeça do zero com um novo
+`HEAD`). Ver §6 e docs/client-behavior.md §6.
 
 Fluxo de destino (produção, com mTLS + token — PLAN.md Fases 4-5, fora do
 escopo desta rodada):
@@ -141,6 +177,22 @@ teto. A PoC deve validar o comportamento real com um chunk de 8 MB (mesmo
 tamanho já usado no PoC do `go-infra-adapters`) tanto com quanto sem
 binary media types configurados, para confirmar o teto efetivo na prática.
 
+**Confirmado na prática:** chunk de 8 MiB validado ponta a ponta com o
+objeto de teste real (~109 MB), reconstruído com checksum SHA-256
+idêntico ao original, com `binary_media_types` corretamente restrito aos
+content-types reais servidos (não `["*/*"]` — ver achado abaixo).
+
+**Achado adicional — `binary_media_types = ["*/*"]` quebra qualquer
+`responseTemplates` (VTL):** com o coringa, o API Gateway passa a tratar
+**toda** resposta da integração como binária — inclusive o corpo XML de
+erro que o S3 devolve num `404`/`412`. VTL não consegue transformar
+conteúdo binário (`Execution failed due to configuration error: Unable
+to transform response`, só visível com CloudWatch Logs habilitado na
+stage). Isso quebrou silenciosamente o redirect dinâmico do cache-miss
+(§4) até restringir `binary_media_types` aos content-types reais do
+proxy. Ver `env/dev/terraform.tfvars` e memória de projeto para o
+histórico completo do diagnóstico.
+
 ## 6. Decisões técnicas e alternativas consideradas
 
 | Alternativa | Avaliação |
@@ -149,6 +201,9 @@ binary media types configurados, para confirmar o teto efetivo na prática.
 | API Gateway → Lambda → S3 (proxy integration) | ❌ Rejeitada para o caminho de dados — adiciona compute (custo + cold start + limite de payload do Lambda, mais restritivo que o do API GW) sem benefício, já que não há transformação necessária no binário |
 | CloudFront Signed URLs (padrão do `media-proxy`) | ❌ Não é o padrão aceito pelo conglomerado para exposição de arquivos privados — mantido apenas como referência de arquitetura alternativa |
 | Multi-range por requisição | ❌ Não suportado pelo S3; cada range é uma requisição HTTP separada |
+| Redirect dinâmico do cache-miss via VTL (`$context.responseOverride.header.Location`) | ✅ Escolhida — resolve a key real sem Lambda no caminho do `404` inicial; exige `binary_media_types` restrito (ver §5) e a base do mapeamento como referência dinâmica, não literal |
+| Lambda de fallback com lock **não-bloqueante** (202 + `Retry-After`) | ✅ Escolhida — evita Lambda ocioso esperando outra invocação terminar (custo) e evita que erros de IAM/permissão (`AccessDenied`) sejam mascarados como "concorrência normal"; qualquer erro que não seja literalmente "lock já existe" vira erro real, não retry silencioso |
+| Consistência entre chunks via `If-Match`/`ETag` (S3 nativo) | ✅ Escolhida — sem custo adicional (S3 já valida `If-Match` se enviado); evita concatenar bytes de versões diferentes do mesmo objeto se ele mudar no meio do download |
 
 ## 7. Padrão de infraestrutura (Terraform)
 
