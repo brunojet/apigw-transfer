@@ -110,9 +110,13 @@ def head(url: str, verbose: bool):
 def get_range(url: str, start: int, end: int, etag: str, retries: int, retry_delay: float, verbose: bool):
     """GET com Range bytes=start-end, mandando If-Match: etag (garante que
     esse chunk vem da mesma versão do objeto que o HEAD viu). Retorna
-    (status, body, headers, tentativas). Um 412 (ETag não bate -- o
-    arquivo mudou no meio do download) não é retentado aqui: quem chama
-    decide o que fazer (ver download())."""
+    (status, body, headers, tentativas) em sucesso ou erro transitório
+    esgotado. Um 412 (ETag não bate -- o arquivo mudou no meio do
+    download) NÃO é um erro comum retentável: levanta RuntimeError aqui
+    mesmo, em vez de devolver como status "normal" -- assim não tem como
+    quem chama esquecer de tratar e acabar concatenando bytes de duas
+    versões diferentes do objeto como se fosse só "mais um chunk que
+    falhou"."""
     req_headers = {"Range": f"bytes={start}-{end}"}
     if etag:
         req_headers["If-Match"] = etag
@@ -120,7 +124,12 @@ def get_range(url: str, start: int, end: int, etag: str, retries: int, retry_del
     while True:
         attempt += 1
         status, headers, body = request(url, "GET", verbose, headers=req_headers)
-        if status in (206, 412) or attempt > retries:
+        if status == 412:
+            raise RuntimeError(
+                "arquivo mudou durante o download (If-Match falhou, 412) -- "
+                "rode de novo pra recomeçar do zero com a versão atual"
+            )
+        if status == 206 or attempt > retries:
             return status, body, headers, attempt
         print(f"  bytes={start}-{end} -> HTTP {status} (tentativa {attempt}/{retries + 1}), "
               f"retry em {retry_delay}s...")
@@ -177,11 +186,6 @@ def download(url: str, out_path: str, chunk_size: int, retries: int, retry_delay
             end = min(start + chunk_size, total) - 1
             idx += 1
             status, body, headers, attempts = get_range(url, start, end, etag, retries, retry_delay, verbose)
-            if status == 412:
-                raise RuntimeError(
-                    "arquivo mudou durante o download (If-Match falhou, 412) -- "
-                    "rode de novo pra recomeçar do zero com a versão atual"
-                )
             content_range = headers.get("Content-Range", "-")
             print(f"[{idx}/{n_chunks}] bytes={start}-{end} -> HTTP {status} "
                   f"len={len(body)} Content-Range={content_range} tentativas={attempts}")
