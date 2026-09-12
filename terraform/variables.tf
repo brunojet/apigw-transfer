@@ -16,6 +16,12 @@ variable "test_object_key" {
   default     = "servicenow-zurich-platform-security-ptbr.pdf"
 }
 
+variable "missing_object_key" {
+  description = "Key que deliberadamente NÃO existe no bucket -- só pra validar o mapeamento 404 -> 302 (S3 responde 404 real, não 403)"
+  type        = string
+  default     = "apigw-transfer-poc-404-test-do-not-create.bin"
+}
+
 variable "api_name" {
   description = "Nome da REST API no API Gateway"
   type        = string

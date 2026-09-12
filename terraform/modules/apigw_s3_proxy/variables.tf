@@ -28,6 +28,12 @@ variable "object_key" {
   type        = string
 }
 
+variable "missing_object_key" {
+  description = "Key que deliberadamente NÃO existe no bucket, usada só para validar o mapeamento 404 -> 302 (S3 responde 404 de verdade, não 403, porque a IAM libera esta key também)"
+  type        = string
+  default     = "apigw-transfer-poc-404-test-do-not-create.bin"
+}
+
 variable "binary_media_types" {
   description = "Binary media types da REST API"
   type        = list(string)

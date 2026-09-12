@@ -27,11 +27,26 @@ resource "aws_iam_role_policy" "apigw_s3" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["s3:GetObject", "s3:HeadObject"]
-      Resource = "${var.bucket_arn}/${var.object_key}"
-    }]
+    Statement = [
+      {
+        # Necessario para o S3 conseguir diferenciar 404 (NoSuchKey) de 403
+        # (AccessDenied) -- sem ListBucket, GetObject numa key inexistente
+        # sempre volta AccessDenied, mesmo com permissao na key certa.
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = var.bucket_arn
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:HeadObject"]
+        Resource = [
+          "${var.bucket_arn}/${var.object_key}",
+          # Key que nunca existe -- so pra provocar 404 real do S3 (em vez
+          # de 403 por falta de permissao) e validar o mapeamento 404 -> 302.
+          "${var.bucket_arn}/${var.missing_object_key}",
+        ]
+      },
+    ]
   })
 }
 

@@ -12,3 +12,8 @@ output "test_object_url" {
   description = "URL completa para baixar o objeto de teste (HEAD/GET com Range)"
   value       = "${module.apigw_s3_proxy.invoke_url}/${var.test_object_key}"
 }
+
+output "missing_object_url" {
+  description = "URL de um objeto que nunca existe -- usada pra validar o mapeamento 404 -> 302"
+  value       = "${module.apigw_s3_proxy.invoke_url}/${var.missing_object_key}"
+}

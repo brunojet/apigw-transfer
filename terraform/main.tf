@@ -28,6 +28,7 @@ module "apigw_s3_proxy" {
   bucket_name        = data.aws_s3_bucket.media.id
   bucket_arn         = data.aws_s3_bucket.media.arn
   object_key         = var.test_object_key
+  missing_object_key = var.missing_object_key
   binary_media_types = var.binary_media_types
   tags               = var.tags
 }

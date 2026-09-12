@@ -6,6 +6,12 @@
 #
 # Ref.: SPEC.md seção 4 (fluxo) e seção 5 (binary media types / teto de
 # payload). Sem mTLS/autorização nesta rodada (adiado — PLAN.md Fases 4-5).
+#
+# 404 -> 302: quando o S3 não acha o objeto, em vez de repassar o 404,
+# devolvemos um 302 com Location. Por enquanto o Location é um PLACEHOLDER
+# ESTATICO — só valida que o mapeamento de status dispara certo. A Lambda
+# real de cache-miss (busca no upstream + lock distribuído) fica pra uma
+# rodada futura (ver conversa/registro no PLAN.md).
 openapi: "3.0.1"
 info:
   title: "${api_name}"
@@ -40,6 +46,10 @@ paths:
             Content-Range: { schema: { type: "string" } }
             Accept-Ranges: { schema: { type: "string" } }
             ETag: { schema: { type: "string" } }
+        "302":
+          description: "objeto ausente no S3 -- redirect (placeholder, ainda sem Lambda de cache-miss)"
+          headers:
+            Location: { schema: { type: "string" } }
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "GET"
@@ -65,6 +75,14 @@ paths:
               method.response.header.Content-Range: "integration.response.header.Content-Range"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
+          "404":
+            statusCode: "302"
+            responseParameters:
+              # /fallback/{key} -- mesmo nome do Lambda de fallback do
+              # go-edge-cache (cmd/fallback/). Endpoint ainda nao existe
+              # (sera implementado numa rodada futura); aqui so validamos
+              # que o mapeamento 404 -> 302 dispara com a key correta.
+              method.response.header.Location: "'https://example.com/cache-miss-fetch-not-implemented-yet'"
     head:
       parameters:
         - name: "key"
@@ -80,6 +98,10 @@ paths:
             Content-Length: { schema: { type: "string" } }
             Accept-Ranges: { schema: { type: "string" } }
             ETag: { schema: { type: "string" } }
+        "302":
+          description: "objeto ausente no S3 -- redirect (placeholder, ainda sem Lambda de cache-miss)"
+          headers:
+            Location: { schema: { type: "string" } }
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "HEAD"
@@ -96,6 +118,14 @@ paths:
               method.response.header.Content-Length: "integration.response.header.Content-Length"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
+          "404":
+            statusCode: "302"
+            responseParameters:
+              # /fallback/{key} -- mesmo nome do Lambda de fallback do
+              # go-edge-cache (cmd/fallback/). Endpoint ainda nao existe
+              # (sera implementado numa rodada futura); aqui so validamos
+              # que o mapeamento 404 -> 302 dispara com a key correta.
+              method.response.header.Location: "'https://example.com/cache-miss-fetch-not-implemented-yet'"
 x-amazon-apigateway-binary-media-types:
 %{ for mt in binary_media_types ~}
   - "${mt}"
