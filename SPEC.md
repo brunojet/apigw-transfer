@@ -196,18 +196,26 @@ histórico completo do diagnóstico.
 **Achado adicional — compressão (gzip) do API Gateway, deliberadamente
 desabilitada:** o atributo `minimum_compression_size` do
 `aws_api_gateway_rest_api` não está configurado neste projeto (não é
-"esquecido", é intencional). Se estivesse, o API Gateway compactaria cada
-resposta `206` de forma independente quando o cliente mandasse
-`Accept-Encoding: gzip` — mas bytes gzip de chunks diferentes **não são
-concatenáveis** pra reconstruir o arquivo original, porque o `Range`
-precisa operar sempre sobre a mesma representação que está de fato
-armazenada no S3 (sempre descompactada, byte a byte). Qualquer
-transformação de conteúdo entre o objeto armazenado e a resposta do
-chunk quebraria a premissa de que `bytes=X-Y` pedido pelo cliente
-corresponde exatamente a `bytes=X-Y` do objeto original. Os
-`binary_media_types` servidos (PDF, imagem, octet-stream, APK) também já
-são formatos comprimidos, então não haveria ganho real mesmo que
-funcionasse.
+"esquecido", é intencional). `Content-Encoding: gzip` é uma
+transformação **por mensagem HTTP**, revertida inteiramente entre
+servidor e cliente antes da aplicação ver o corpo — então não é verdade
+que bytes gzip de chunks diferentes precisariam ser concatenados
+comprimidos; cada bloco chega descomprimido de volta ao byte-range
+exato antes de ser gravado no arquivo (contanto que a lib HTTP do
+cliente decodifique `Content-Encoding` automaticamente, como fazem
+`requests`, `OkHttp` e browsers — `urllib` puro não decodifica sozinho,
+mas também não manda `Accept-Encoding: gzip` por padrão, então nem
+aciona a compressão nesse caso). Os motivos reais pra manter desabilitado
+são outros:
+- Os `binary_media_types` servidos (PDF, imagem, octet-stream, APK) já
+  são formatos comprimidos — gzip por cima não reduz quase nada, só
+  adiciona processamento sem ganho.
+- Depende de **toda** lib de cliente decodificar `Content-Encoding`
+  corretamente. Um cliente com implementação HTTP mínima que manda
+  `Accept-Encoding: gzip` mas não decodifica sozinho receberia bytes
+  comprimidos crus e corromperia o chunk silenciosamente, sem sinal de
+  erro — risco desnecessário pra um ganho que já é ~zero no primeiro
+  ponto.
 
 ## 6. Decisões técnicas e alternativas consideradas
 
@@ -220,7 +228,7 @@ funcionasse.
 | Redirect dinâmico do cache-miss via VTL (`$context.responseOverride.header.Location`) | ✅ Escolhida — resolve a key real sem Lambda no caminho do `404` inicial; exige `binary_media_types` restrito (ver §5) e a base do mapeamento como referência dinâmica, não literal |
 | Lambda de fallback com lock **não-bloqueante** (202 + `Retry-After`) | ✅ Escolhida — evita Lambda ocioso esperando outra invocação terminar (custo) e evita que erros de IAM/permissão (`AccessDenied`) sejam mascarados como "concorrência normal"; qualquer erro que não seja literalmente "lock já existe" vira erro real, não retry silencioso |
 | Consistência entre chunks via `If-Match`/`ETag` (S3 nativo) | ✅ Escolhida — sem custo adicional (S3 já valida `If-Match` se enviado); evita concatenar bytes de versões diferentes do mesmo objeto se ele mudar no meio do download |
-| Compressão (gzip) via `minimum_compression_size` | ❌ Não habilitada — quebraria a premissa de que `Range` opera sobre a representação exata armazenada no S3; chunks gzip de trechos diferentes não são concatenáveis de volta ao arquivo original (ver §5) |
+| Compressão (gzip) via `minimum_compression_size` | ❌ Não habilitada — sem ganho real pra formatos já comprimidos servidos (PDF/imagem/octet-stream/APK) e dependeria de toda lib cliente decodificar `Content-Encoding` corretamente pra não corromper o chunk silenciosamente (ver §5) |
 
 ## 7. Padrão de infraestrutura (Terraform)
 
