@@ -31,6 +31,11 @@ paths:
           required: false
           schema:
             type: "string"
+        - name: "If-Match"
+          in: "header"
+          required: false
+          schema:
+            type: "string"
       responses:
         "200":
           description: "objeto completo"
@@ -52,6 +57,8 @@ paths:
           headers:
             Location: { schema: { type: "string" } }
             Cache-Control: { schema: { type: "string" } }
+        "412":
+          description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "GET"
@@ -61,6 +68,7 @@ paths:
         requestParameters:
           integration.request.path.key: "method.request.path.key"
           integration.request.header.Range: "method.request.header.Range"
+          integration.request.header.If-Match: "method.request.header.If-Match"
         responses:
           default:
             statusCode: "200"
@@ -77,6 +85,8 @@ paths:
               method.response.header.Content-Range: "integration.response.header.Content-Range"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
+          "412":
+            statusCode: "412"
           "404":
             statusCode: "302"
             responseParameters:
