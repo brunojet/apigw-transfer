@@ -39,3 +39,6 @@ __pycache__/
 # Go build artifacts (scripts/build-lambda.sh regenera)
 /build/
 *.exe
+
+# Sidecars de ETag do scripts/download_range.py (retomada de download)
+*.etag

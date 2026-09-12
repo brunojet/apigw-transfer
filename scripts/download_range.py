@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
-"""Baixa um objeto do apigw-transfer em blocos: HEAD (tamanho) + GET com
-Range por bloco. Segue o contrato completo do cliente (ver
+"""Baixa um objeto do apigw-transfer em blocos: HEAD (tamanho + ETag) + GET
+com Range por bloco. Segue o contrato completo do cliente (ver
 docs/client-behavior.md): o Location do 404 já vem 100% resolvido pelo
 servidor (monta a key real via VTL -- ver módulo apigw_s3_proxy), então
 basta seguir redirect normalmente -- usa o auto-follow padrão do urllib
 (path direto -> 302 -> /fallback/{key} -> 302 -> path direto, tudo numa
 chamada só). O 202 (lock ocupado no fallback) é tratado de forma
 transparente dentro de request() -- não é um redirect, mas também não
-precisa de lógica especial em quem chama: qualquer HEAD/GET (não só o
-de disponibilidade) espera o Retry-After e tenta de novo sozinho. Isso é
-desacoplado do retry específico de chunk em get_range() (que trata erro
-transitório tipo 500, não 202). Só stdlib (urllib), sem dependencias.
+precisa de lógica especial em quem chama: qualquer HEAD/GET espera o
+Retry-After e tenta de novo sozinho. Isso é desacoplado do retry
+específico de chunk em get_range() (que trata erro transitório tipo 500,
+não 202).
+
+Consistência entre chunks: manda `If-Match: <etag>` (do HEAD inicial) em
+todo GET Range -- se o arquivo mudar no meio do download, o S3 responde
+412 e o script para na hora, em vez de concatenar bytes de duas versões
+diferentes do objeto.
+
+Retomada: grava o ETag num sidecar `<saida>.etag`. Se rodar de novo e o
+arquivo de saída + sidecar já existirem com o MESMO ETag do HEAD atual,
+continua de onde parou (ou pula direto se já estiver completo) em vez de
+baixar tudo de novo. Se o ETag mudou, descarta o parcial e recomeça do
+zero com a versão atual.
+
+Só stdlib (urllib), sem dependencias.
 
 Uso:
     python scripts/download_range.py [url] [-o saida.bin] [-c BYTES] [-r N] [-v]
@@ -21,6 +34,7 @@ com 'terraform output -raw test_object_url'.
 """
 
 import argparse
+import os
 import sys
 import time
 import urllib.error
@@ -76,8 +90,8 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
         time.sleep(retry_after)
 
 
-def head(url: str, verbose: bool) -> int:
-    """Único HEAD: descobre o tamanho e, de quebra, resolve a
+def head(url: str, verbose: bool):
+    """Único HEAD: descobre tamanho + ETag e, de quebra, resolve a
     disponibilidade -- não precisa de uma etapa separada pra isso. O
     urllib já seguiu os redirects sozinho (path direto -> fallback ->
     path direto) e request() já absorveu qualquer 202 no caminho; aqui só
@@ -85,43 +99,89 @@ def head(url: str, verbose: bool) -> int:
     status, headers, body = request(url, "HEAD", verbose)
     if status == 200:
         size = int(headers.get("Content-Length", "0"))
-        print(f"HEAD -> {status} Content-Length={size}")
-        return size
+        etag = headers.get("ETag", "")
+        print(f"HEAD -> {status} Content-Length={size} ETag={etag}")
+        return size, etag
     if status == 404:
         raise RuntimeError(f"objeto não existe nem na origem (404 permanente): {body[:300]!r}")
     raise RuntimeError(f"HEAD retornou status inesperado: {status} body={body[:300]!r}")
 
 
-def get_range(url: str, start: int, end: int, retries: int, retry_delay: float, verbose: bool):
-    """GET com Range bytes=start-end. Retorna (status, body, headers, tentativas)."""
+def get_range(url: str, start: int, end: int, etag: str, retries: int, retry_delay: float, verbose: bool):
+    """GET com Range bytes=start-end, mandando If-Match: etag (garante que
+    esse chunk vem da mesma versão do objeto que o HEAD viu). Retorna
+    (status, body, headers, tentativas). Um 412 (ETag não bate -- o
+    arquivo mudou no meio do download) não é retentado aqui: quem chama
+    decide o que fazer (ver download())."""
+    req_headers = {"Range": f"bytes={start}-{end}"}
+    if etag:
+        req_headers["If-Match"] = etag
     attempt = 0
     while True:
         attempt += 1
-        status, headers, body = request(url, "GET", verbose, headers={"Range": f"bytes={start}-{end}"})
-        if status == 206 or attempt > retries:
+        status, headers, body = request(url, "GET", verbose, headers=req_headers)
+        if status in (206, 412) or attempt > retries:
             return status, body, headers, attempt
         print(f"  bytes={start}-{end} -> HTTP {status} (tentativa {attempt}/{retries + 1}), "
               f"retry em {retry_delay}s...")
         time.sleep(retry_delay)
 
 
+def _etag_sidecar(out_path: str) -> str:
+    return out_path + ".etag"
+
+
+def _load_saved_etag(out_path: str):
+    sidecar = _etag_sidecar(out_path)
+    if os.path.exists(sidecar):
+        with open(sidecar, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    return None
+
+
+def _save_etag(out_path: str, etag: str):
+    with open(_etag_sidecar(out_path), "w", encoding="utf-8") as f:
+        f.write(etag)
+
+
 def download(url: str, out_path: str, chunk_size: int, retries: int, retry_delay: float, verbose: bool):
-    total = head(url, verbose)
+    total, etag = head(url, verbose)
     if total == 0:
         print("Content-Length veio 0/ausente — abortando.")
         sys.exit(1)
 
-    n_chunks = (total + chunk_size - 1) // chunk_size
-    print(f"Baixando {total} bytes em {n_chunks} blocos de {chunk_size} bytes...")
+    start = 0
+    mode = "wb"
+    saved_etag = _load_saved_etag(out_path)
+    if saved_etag and os.path.exists(out_path):
+        if saved_etag == etag:
+            existing_size = os.path.getsize(out_path)
+            if existing_size >= total:
+                print(f"Já baixado por completo ({existing_size} bytes, ETag confere) — nada a fazer.")
+                return
+            start = existing_size
+            mode = "ab"
+            print(f"Retomando de onde parou: {start}/{total} bytes já no disco (ETag confere).")
+        else:
+            print("ETag mudou desde a última tentativa — descartando parcial e recomeçando do zero.")
+
+    _save_etag(out_path, etag)
+
+    n_chunks = ((total - start) + chunk_size - 1) // chunk_size
+    print(f"Baixando {total - start} bytes restantes em {n_chunks} blocos de {chunk_size} bytes...")
 
     failures = []
-    with open(out_path, "wb") as f:
-        start = 0
+    with open(out_path, mode) as f:
         idx = 0
         while start < total:
             end = min(start + chunk_size, total) - 1
             idx += 1
-            status, body, headers, attempts = get_range(url, start, end, retries, retry_delay, verbose)
+            status, body, headers, attempts = get_range(url, start, end, etag, retries, retry_delay, verbose)
+            if status == 412:
+                raise RuntimeError(
+                    "arquivo mudou durante o download (If-Match falhou, 412) -- "
+                    "rode de novo pra recomeçar do zero com a versão atual"
+                )
             content_range = headers.get("Content-Range", "-")
             print(f"[{idx}/{n_chunks}] bytes={start}-{end} -> HTTP {status} "
                   f"len={len(body)} Content-Range={content_range} tentativas={attempts}")
@@ -133,15 +193,8 @@ def download(url: str, out_path: str, chunk_size: int, retries: int, retry_delay
             f.write(body)
             start = end + 1
 
-    downloaded_expected = total
-    actual_size = 0
-    try:
-        import os
-        actual_size = os.path.getsize(out_path)
-    except OSError:
-        pass
-
-    print(f"\nConcluído. Esperado={downloaded_expected} bytes, arquivo local={actual_size} bytes"
+    actual_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+    print(f"\nConcluído. Esperado={total} bytes, arquivo local={actual_size} bytes"
           + (" (OK, sem falhas)" if not failures else f" -- {len(failures)} bloco(s) falharam: {failures}"))
 
 

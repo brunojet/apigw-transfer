@@ -162,19 +162,23 @@ flowchart TD
 | `404` no `/fallback/{key}` | Erro **permanente** — o objeto não existe nem na origem simulada. Não adianta repetir. |
 | `500` (qualquer endpoint) | Erro transitório — retry com backoff exponencial (ex.: 1s, 2s, 4s..., com teto e número máximo de tentativas). |
 | Timeout de rede | Tratar como erro transitório — retry com backoff, igual a um 500. |
+| Consistência entre chunks | Guardar o `ETag` do `HEAD` inicial e mandar `If-Match: <etag>` em todo `GET` com `Range` — se o arquivo mudar no meio do download, o S3 responde `412 Precondition Failed` (o servidor repassa isso, não mascara como 200). |
+| `412` num chunk | Erro **permanente pro download em andamento** — o objeto mudou de versão no meio do processo. Não adianta retentar o mesmo chunk; é preciso descartar o que já foi baixado e recomeçar do zero com a versão atual (novo `HEAD`, novo `ETag`). |
+| Retomar download interrompido | Guardar o `ETag` junto com o arquivo parcial (ex.: sidecar `<arquivo>.etag`). Ao retomar: fazer `HEAD` de novo — se o `ETag` bater com o salvo, continuar do byte onde parou (`Range` começando do tamanho atual do arquivo local); se não bater, descartar o parcial e recomeçar do zero. |
 
 ## 7. Limites conhecidos (não normativo, mas relevante pro cliente)
 
 - O teto de payload do API Gateway é **rígido**: ultrapassar causa falha
   abrupta (não é "entrega parcial e avisa"). Por isso o chunk de 8 MiB é
   uma recomendação forte, não só uma otimização.
-- `binary_media_types = ["*/*"]` precisa estar configurado no servidor
-  pra o corpo binário vir intacto — sem isso, o conteúdo vem corrompido
-  (não é "só" inflado, ver SPEC.md §5). Isso é responsabilidade do
-  servidor, mas o cliente deve validar a integridade do arquivo reconstruído
-  (ex.: comparar tamanho final com o `Content-Length` do `HEAD`, ou
-  checksum se disponível) — não assumir que o corpo veio correto sem
-  checar.
+- `binary_media_types` precisa estar configurado no servidor com os
+  content-types reais que ele serve (não vazio, e não é obrigatório ser
+  `"*/*"`) pra o corpo binário vir intacto — sem isso, o conteúdo vem
+  corrompido (não é "só" inflado, ver SPEC.md §5). Isso é responsabilidade
+  do servidor, mas o cliente deve validar a integridade do arquivo
+  reconstruído (comparar tamanho final com o `Content-Length` do `HEAD`,
+  e idealmente usar o mecanismo de `If-Match`/`ETag` acima) — não assumir
+  que o corpo veio correto sem checar.
 - Não há garantia de quanto tempo o fallback demora pra popular um
   arquivo grande — depende do tamanho do arquivo na origem simulada. O
   cliente deve ter um teto razoável de tentativas/tempo total antes de
