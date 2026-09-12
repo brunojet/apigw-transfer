@@ -54,6 +54,7 @@ resource "aws_iam_role_policy" "apigw_s3" {
 locals {
   openapi_spec = templatefile("${path.module}/openapi.yaml.tftpl", {
     api_name                   = var.api_name
+    stage_name                 = var.stage_name
     aws_region                 = var.aws_region
     bucket_name                = var.bucket_name
     execution_role_arn         = aws_iam_role.apigw_s3.arn

@@ -47,9 +47,10 @@ paths:
             Accept-Ranges: { schema: { type: "string" } }
             ETag: { schema: { type: "string" } }
         "302":
-          description: "objeto ausente no S3 -- redirect (placeholder, ainda sem Lambda de cache-miss)"
+          description: "objeto ausente no S3 -- redirect pro /fallback/{key} (cliente resolve o template)"
           headers:
             Location: { schema: { type: "string" } }
+            Cache-Control: { schema: { type: "string" } }
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "GET"
@@ -82,7 +83,14 @@ paths:
               # go-edge-cache (cmd/fallback/). Endpoint ainda nao existe
               # (sera implementado numa rodada futura); aqui so validamos
               # que o mapeamento 404 -> 302 dispara com a key correta.
-              method.response.header.Location: "'https://example.com/cache-miss-fetch-not-implemented-yet'"
+              # Location e' um TEMPLATE estatico (nao um valor resolvido) --
+              # o cliente troca o literal "{key}" pela key que ele mesmo ja
+              # pediu. Nao da' pra montar isso dinamico aqui (ver memoria de
+              # projeto: nenhuma referencia ao request e' permitida numa
+              # integration response), mas uma string estatica com {key}
+              # dentro funciona igual ao placeholder anterior.
+              method.response.header.Location: "'/${stage_name}/fallback/{key}'"
+              method.response.header.Cache-Control: "'no-cache, no-store, must-revalidate'"
     head:
       parameters:
         - name: "key"
@@ -99,9 +107,10 @@ paths:
             Accept-Ranges: { schema: { type: "string" } }
             ETag: { schema: { type: "string" } }
         "302":
-          description: "objeto ausente no S3 -- redirect (placeholder, ainda sem Lambda de cache-miss)"
+          description: "objeto ausente no S3 -- redirect pro /fallback/{key} (cliente resolve o template)"
           headers:
             Location: { schema: { type: "string" } }
+            Cache-Control: { schema: { type: "string" } }
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "HEAD"
@@ -125,7 +134,14 @@ paths:
               # go-edge-cache (cmd/fallback/). Endpoint ainda nao existe
               # (sera implementado numa rodada futura); aqui so validamos
               # que o mapeamento 404 -> 302 dispara com a key correta.
-              method.response.header.Location: "'https://example.com/cache-miss-fetch-not-implemented-yet'"
+              # Location e' um TEMPLATE estatico (nao um valor resolvido) --
+              # o cliente troca o literal "{key}" pela key que ele mesmo ja
+              # pediu. Nao da' pra montar isso dinamico aqui (ver memoria de
+              # projeto: nenhuma referencia ao request e' permitida numa
+              # integration response), mas uma string estatica com {key}
+              # dentro funciona igual ao placeholder anterior.
+              method.response.header.Location: "'/${stage_name}/fallback/{key}'"
+              method.response.header.Cache-Control: "'no-cache, no-store, must-revalidate'"
   "/fallback/{key+}":
     get:
       parameters:
