@@ -98,9 +98,14 @@ func Handle(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIG
 	}
 
 	// Tentativa única, não bloqueante. Se já travado, devolve a espera pro
-	// cliente (Retry-After) em vez de segurar a Lambda esperando.
+	// cliente (Retry-After) em vez de segurar a Lambda esperando. Qualquer
+	// OUTRO erro (permissão, rede, etc.) não é "está ocupado" -- é um erro
+	// de verdade, que esperar não resolve (ver memória de projeto).
 	if lockErr := bucket.GetLock(ctx, key, lockTTL); lockErr != nil {
-		return retryLaterResponse(fmt.Sprintf("fetch already in progress for %s", key)), nil
+		if storageadapters.IsLockHeld(lockErr) {
+			return retryLaterResponse(fmt.Sprintf("fetch already in progress for %s", key)), nil
+		}
+		return errorResponse(http.StatusInternalServerError, fmt.Sprintf("lock acquire failed for %s: %v", key, lockErr)), nil
 	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
