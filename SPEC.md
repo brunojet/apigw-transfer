@@ -201,7 +201,13 @@ transformação **por mensagem HTTP**, revertida inteiramente entre
 servidor e cliente antes da aplicação ver o corpo — então não é verdade
 que bytes gzip de chunks diferentes precisariam ser concatenados
 comprimidos; cada bloco chega descomprimido de volta ao byte-range
-exato antes de ser gravado no arquivo (contanto que a lib HTTP do
+exato antes de ser gravado no arquivo. Precisão importante aqui:
+`Content-Length` descreve o tamanho do que é **transmitido** naquela
+mensagem (encolheria com compressão), enquanto `Content-Range` sempre
+descreve a posição no **arquivo original**, sem relação com o que
+trafegou — são dois campos independentes, e é por isso que a
+reconciliação funciona: a descompressão desfaz o que `Content-Length`
+media, e o resultado bate com o que `Content-Range` prometeu (contanto que a lib HTTP do
 cliente decodifique `Content-Encoding` automaticamente, como fazem
 `requests`, `OkHttp` e browsers — `urllib` puro não decodifica sozinho,
 mas também não manda `Accept-Encoding: gzip` por padrão, então nem
