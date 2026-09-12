@@ -201,7 +201,22 @@ cache-miss, concorrência, `412`, retomada).
   por chunk — sem isso, um `202` que nunca resolve (lock preso, Lambda
   com erro recorrente) faz o cliente fazer polling pra sempre.
 
-## 8. Limites conhecidos (não normativo, mas relevante pro cliente)
+## 8. Referência OkHttp (Android)
+
+Sketch completo em
+[docs/examples/OkHttpFallbackInterceptor.kt](examples/OkHttpFallbackInterceptor.kt).
+A ideia é configurar isso uma vez no `OkHttpClient` e qualquer chamada
+feita com ele já segue o contrato deste documento sem o chamador precisar
+checar `202`/`412` manualmente a cada requisição:
+
+| Parte do contrato | Quem resolve |
+|---|---|
+| `302` (cache-miss) | O próprio OkHttp — segue redirect por padrão, e o `Location` já vem resolvido com a key real pelo servidor (§3), sem lógica extra |
+| `202` + `Retry-After` | `FallbackRetryInterceptor` — espera e repete a *mesma* requisição, até um teto de tempo (mesmo papel do wrapper `request()` em `scripts/download_range.py`) |
+| `412` | `PreconditionFailedInterceptor` — lança exceção no ponto de detecção, em vez de devolver como resposta "normal" que o chamador precisa lembrar de checar |
+| Loop de chunking, offset de resume, leitura/escrita do `ETag` em disco | Fica no app — não cabe num interceptor (que só enxerga uma request/response por vez); ver `download()`/`head()` em `scripts/download_range.py` como referência da mesma lógica em Python |
+
+## 9. Limites conhecidos (não normativo, mas relevante pro cliente)
 
 - O teto de payload do API Gateway é **rígido**: ultrapassar causa falha
   abrupta (não é "entrega parcial e avisa"). Por isso o chunk de 8 MiB é
