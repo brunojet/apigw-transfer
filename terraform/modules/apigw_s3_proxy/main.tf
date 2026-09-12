@@ -58,16 +58,22 @@ locals {
     aws_region                 = var.aws_region
     bucket_name                = var.bucket_name
     execution_role_arn         = aws_iam_role.apigw_s3.arn
-    binary_media_types         = var.binary_media_types
     fallback_lambda_invoke_arn = var.fallback_lambda_invoke_arn
   })
 }
 
 resource "aws_api_gateway_rest_api" "this" {
-  name              = var.api_name
-  body              = local.openapi_spec
-  put_rest_api_mode = "overwrite"
-  tags              = var.tags
+  name = var.api_name
+  # binary_media_types como atributo nativo do recurso -- a extensao
+  # x-amazon-apigateway-binary-media-types no body do OpenAPI nao e'
+  # honrada de forma confiavel pelo PutRestApi em modo "overwrite"
+  # (update), so aparenta funcionar no import inicial. Achado real:
+  # confirmado com `aws apigateway get-rest-api` mostrando "*/*" preso
+  # mesmo depois de mudar var.binary_media_types e reaplicar varias vezes.
+  binary_media_types = var.binary_media_types
+  body               = local.openapi_spec
+  put_rest_api_mode  = "overwrite"
+  tags               = var.tags
 }
 
 resource "aws_api_gateway_deployment" "this" {

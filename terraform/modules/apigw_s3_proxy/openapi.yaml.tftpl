@@ -1,17 +1,18 @@
 # Contrato da API — gerado a partir deste template pelo Terraform
 # (templatefile em main.tf). Isso é o que "compete ao contrato": paths,
-# methods, integrações com o S3, mapeamento de headers/status e binary
-# media types. O Terraform só injeta os valores (região, bucket, role) e
-# gerencia o wrapper de infra (REST API, deployment, stage, IAM).
+# methods, integrações com o S3, mapeamento de headers/status. O Terraform
+# só injeta os valores (região, bucket, role) e gerencia o wrapper de
+# infra (REST API, deployment, stage, IAM, binary_media_types -- esse
+# último fica como atributo nativo do aws_api_gateway_rest_api, não como
+# extensão aqui, porque PutRestApi em modo "overwrite" não honra
+# x-amazon-apigateway-binary-media-types de forma confiável em updates).
 #
 # Ref.: SPEC.md seção 4 (fluxo) e seção 5 (binary media types / teto de
 # payload). Sem mTLS/autorização nesta rodada (adiado — PLAN.md Fases 4-5).
 #
-# 404 -> 302: quando o S3 não acha o objeto, em vez de repassar o 404,
-# devolvemos um 302 com Location. Por enquanto o Location é um PLACEHOLDER
-# ESTATICO — só valida que o mapeamento de status dispara certo. A Lambda
-# real de cache-miss (busca no upstream + lock distribuído) fica pra uma
-# rodada futura (ver conversa/registro no PLAN.md).
+# 404 -> 302 -> /fallback/{key} -> 302 -> 200/206: totalmente transparente
+# pra um cliente HTTP que segue redirect (curl -L, browsers, a maioria das
+# libs) -- ver detalhes no comentário do bloco "404" abaixo.
 openapi: "3.0.1"
 info:
   title: "${api_name}"
@@ -79,18 +80,28 @@ paths:
           "404":
             statusCode: "302"
             responseParameters:
-              # /fallback/{key} -- mesmo nome do Lambda de fallback do
-              # go-edge-cache (cmd/fallback/). Endpoint ainda nao existe
-              # (sera implementado numa rodada futura); aqui so validamos
-              # que o mapeamento 404 -> 302 dispara com a key correta.
-              # Location e' um TEMPLATE estatico (nao um valor resolvido) --
-              # o cliente troca o literal "{key}" pela key que ele mesmo ja
-              # pediu. Nao da' pra montar isso dinamico aqui (ver memoria de
-              # projeto: nenhuma referencia ao request e' permitida numa
-              # integration response), mas uma string estatica com {key}
-              # dentro funciona igual ao placeholder anterior.
-              method.response.header.Location: "'/${stage_name}/fallback/{key}'"
+              # Location dinamico de verdade, montado no responseTemplates
+              # abaixo via $context.responseOverride.header.Location -- por
+              # isso o valor aqui e' so uma referencia de base
+              # (integration.response.header.Location, que o S3 nunca
+              # manda) e nao um literal: um literal como base bloqueia o
+              # override (fica preso no valor estatico, sem erro).
+              method.response.header.Location: integration.response.header.Location
               method.response.header.Cache-Control: "'no-cache, no-store, must-revalidate'"
+            responseTemplates:
+              # $default (nao "application/json"/"*/*") para funcionar com
+              # qualquer Accept do cliente, sem precisar negociar
+              # content-type. $input.params('key') funciona aqui porque
+              # essa integration response nao e' mais tratada como binaria
+              # -- binary_media_types (ver main.tf) foi restrito aos
+              # content-types reais que o proxy serve; com "*/*" o S3
+              # (application/xml no erro) virava [Binary Data] e VTL nunca
+              # roda em cima de binario ("Unable to transform response",
+              # visivel so com CloudWatch Logs habilitado -- ver memoria de
+              # projeto pra como isso foi diagnosticado).
+              $default: |
+                #set($key = $input.params('key'))
+                #set($context.responseOverride.header.Location = "/${stage_name}/fallback/$key")
     head:
       parameters:
         - name: "key"
@@ -130,18 +141,28 @@ paths:
           "404":
             statusCode: "302"
             responseParameters:
-              # /fallback/{key} -- mesmo nome do Lambda de fallback do
-              # go-edge-cache (cmd/fallback/). Endpoint ainda nao existe
-              # (sera implementado numa rodada futura); aqui so validamos
-              # que o mapeamento 404 -> 302 dispara com a key correta.
-              # Location e' um TEMPLATE estatico (nao um valor resolvido) --
-              # o cliente troca o literal "{key}" pela key que ele mesmo ja
-              # pediu. Nao da' pra montar isso dinamico aqui (ver memoria de
-              # projeto: nenhuma referencia ao request e' permitida numa
-              # integration response), mas uma string estatica com {key}
-              # dentro funciona igual ao placeholder anterior.
-              method.response.header.Location: "'/${stage_name}/fallback/{key}'"
+              # Location dinamico de verdade, montado no responseTemplates
+              # abaixo via $context.responseOverride.header.Location -- por
+              # isso o valor aqui e' so uma referencia de base
+              # (integration.response.header.Location, que o S3 nunca
+              # manda) e nao um literal: um literal como base bloqueia o
+              # override (fica preso no valor estatico, sem erro).
+              method.response.header.Location: integration.response.header.Location
               method.response.header.Cache-Control: "'no-cache, no-store, must-revalidate'"
+            responseTemplates:
+              # $default (nao "application/json"/"*/*") para funcionar com
+              # qualquer Accept do cliente, sem precisar negociar
+              # content-type. $input.params('key') funciona aqui porque
+              # essa integration response nao e' mais tratada como binaria
+              # -- binary_media_types (ver main.tf) foi restrito aos
+              # content-types reais que o proxy serve; com "*/*" o S3
+              # (application/xml no erro) virava [Binary Data] e VTL nunca
+              # roda em cima de binario ("Unable to transform response",
+              # visivel so com CloudWatch Logs habilitado -- ver memoria de
+              # projeto pra como isso foi diagnosticado).
+              $default: |
+                #set($key = $input.params('key'))
+                #set($context.responseOverride.header.Location = "/${stage_name}/fallback/$key")
   "/fallback/{key+}":
     get:
       parameters:
@@ -167,7 +188,3 @@ paths:
         httpMethod: "POST"
         uri: "${fallback_lambda_invoke_arn}"
         passthroughBehavior: "when_no_match"
-x-amazon-apigateway-binary-media-types:
-%{ for mt in binary_media_types ~}
-  - "${mt}"
-%{ endfor ~}

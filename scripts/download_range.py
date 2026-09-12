@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Baixa um objeto do apigw-transfer em blocos: HEAD (tamanho) + GET com
 Range por bloco. Segue o contrato completo do cliente (ver
-docs/client-behavior.md): se o path direto responder 404/302, resolve o
-template do Location (troca o literal "{key}" pela key real), chama
-/fallback/{key}, trata 202 + Retry-After (espera e repete) até o fallback
-responder 302, e só então baixa o conteúdo de verdade. Só stdlib
-(urllib), sem dependencias.
+docs/client-behavior.md): se o path direto responder 404/302, segue o
+Location (já vem totalmente resolvido pelo servidor, monta dinamicamente
+via VTL -- ver módulo apigw_s3_proxy) até /fallback/{key}, trata
+202 + Retry-After (espera e repete) até o fallback responder 302, e só
+então baixa o conteúdo de verdade. Só stdlib (urllib), sem dependencias.
 
 Uso:
     python scripts/download_range.py [url] [-o saida.bin] [-c BYTES] [-r N] [-v]
@@ -30,11 +30,11 @@ MAX_FALLBACK_WAIT_SECONDS = 120
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """urlopen() segue 301/302/303/307 automaticamente por padrao -- ruim
-    aqui porque o Location do 404 e' um TEMPLATE com chaves literais
-    ("/dev/fallback/{key}"), nao uma URL pronta pra buscar. Sem isso, o
-    urllib tenta buscar essa URL malformada sozinho e o CloudFront rejeita
-    com 400 antes do nosso codigo sequer ver o Location."""
+    """urlopen() segue 301/302/303/307 automaticamente por padrao -- aqui
+    a gente quer inspecionar cada 302 manualmente (o 202 do fallback, por
+    exemplo, nao e' um redirect e precisa do proprio tratamento de
+    Retry-After), entao desabilita o auto-follow e decide explicitamente
+    em ensure_available()."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -63,13 +63,6 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
     return status, resp_headers, body
 
 
-def resolve_fallback_url(location_template: str, key: str, origin: str) -> str:
-    """Location do 404 é um template estático com o literal '{key}' dentro
-    (ex.: '/dev/fallback/{key}') -- o cliente troca pela key real."""
-    path = location_template.replace("{key}", urllib.parse.quote(key, safe="/"))
-    return origin + path
-
-
 def ensure_available(direct_url: str, verbose: bool) -> str:
     """Garante que o objeto existe no path direto, acionando o fallback se
     preciso. Retorna a URL final (pode ser a mesma direct_url) pronta pra
@@ -77,7 +70,6 @@ def ensure_available(direct_url: str, verbose: bool) -> str:
     ou se o teto de espera (MAX_FALLBACK_WAIT_SECONDS) estourar."""
     parts = urllib.parse.urlsplit(direct_url)
     origin = f"{parts.scheme}://{parts.netloc}"
-    key = parts.path.rsplit("/", 1)[-1]
 
     status, headers, _ = request(direct_url, "HEAD", verbose)
     if status == 200:
@@ -89,7 +81,9 @@ def ensure_available(direct_url: str, verbose: bool) -> str:
     if not location:
         raise RuntimeError(f"status {status} sem header Location -- não sei montar o fallback")
 
-    fallback_url = resolve_fallback_url(location, key, origin)
+    # Location já vem resolvido (a key real, não um template) -- o
+    # servidor monta isso via VTL (ver módulo apigw_s3_proxy).
+    fallback_url = origin + location
     print(f"Objeto ausente no path direto -- acionando fallback: {fallback_url}")
 
     deadline = time.time() + MAX_FALLBACK_WAIT_SECONDS

@@ -11,15 +11,13 @@ servidor é montado.
 - **Descoberta de tamanho:** `HEAD /{key}` sempre primeiro.
 - **Download:** `GET /{key}` com header `Range`, em blocos (nunca sem
   `Range` — ver SPEC.md seção 5, teto de payload do API Gateway).
-- **Cache-miss:** se `/{key}` responder `302`/`404`, o header `Location`
-  vem como um **template estático** contendo o literal `{key}` (ex.:
-  `/dev/fallback/{key}`) — o cliente troca esse literal pela key que ele
-  mesmo já pediu e chama a URL resultante. Não é um redirect "pronto pra
-  seguir" (nenhum HTTP client genérico deve seguir esse `Location`
-  cegamente) — é um template que precisa ser resolvido antes. Isso existe
-  porque o servidor não consegue montar esse valor dinamicamente sem
-  Lambda no caminho de sucesso (ver decisão registrada no SPEC.md/memória
-  de projeto).
+- **Cache-miss:** se `/{key}` responder `404`, o servidor responde `302`
+  com um `Location` **já totalmente resolvido** (ex.:
+  `/dev/fallback/apigw-transfer-fallback-test.bin`, montado dinamicamente
+  no servidor via VTL — ver módulo `apigw_s3_proxy`). O cliente pode
+  **seguir esse redirect automaticamente**, igual qualquer `302` HTTP
+  normal (`curl -L`, browsers, a maioria das libs fazem isso sozinhas) —
+  não precisa montar nem resolver nada manualmente.
 - **Concorrência:** se `/fallback/{key}` responder `202`, o cliente
   **precisa** respeitar o header `Retry-After` antes de tentar de novo —
   não é opcional, é o mecanismo que evita custo duplicado de Lambda.
@@ -59,9 +57,9 @@ sequenceDiagram
     C->>AGW: HEAD /{key}
     AGW->>S3d: HeadObject(key)
     S3d-->>AGW: 404 NoSuchKey
-    AGW-->>C: 302, Location: /{stage}/fallback/{key} (template)
+    AGW-->>C: 302, Location: /{stage}/fallback/{key} (já resolvido)
 
-    Note over C: cliente troca o literal "{key}" pela key real
+    Note over C: cliente só segue o redirect (automático)
 
     C->>AGW: GET /fallback/{key}
     AGW->>L: invoke (Lambda proxy)
@@ -158,7 +156,7 @@ flowchart TD
 | Antes de baixar | Sempre fazer `HEAD /{key}` primeiro pra saber o tamanho total. |
 | Download | Sempre usar `Range` — nunca `GET` sem `Range` num objeto que pode passar do teto de payload do API Gateway (ver SPEC.md §5). |
 | Tamanho de chunk | Usar no máximo **8 MiB** por chunk — validado ponta a ponta (Fase 3); tamanhos maiores tiveram comportamento instável nos nossos testes. |
-| `404`/`302` no path direto | Ler o `Location` (template, ex. `/dev/fallback/{key}`), trocar o literal `{key}` pela key que já foi pedida, e chamar a URL resultante — não é feito pelo servidor. |
+| `404`/`302` no path direto | Seguir o `Location` — já vem resolvido (path real, sem template) e pode ser seguido automaticamente como qualquer redirect HTTP. |
 | `202` no `/fallback/{key}` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita concorrência desnecessária de Lambda. |
 | `302` no `/fallback/{key}` | Seguir o `Location` (path relativo, já inclui o stage) — geralmente volta pro path direto, que agora deve responder `200`/`206`. |
 | `404` no `/fallback/{key}` | Erro **permanente** — o objeto não existe nem na origem simulada. Não adianta repetir. |
