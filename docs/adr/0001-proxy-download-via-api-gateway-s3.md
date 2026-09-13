@@ -164,6 +164,42 @@ bucket. Três elementos centrais:
 - Se o processo de fallback morrer sem liberar o lock (queda abrupta do
   pod, OOM), a key fica respondendo `202` até o TTL do lock expirar.
 
+## Custo
+
+A planilha [docs/custo/apigw-vs-cloudfront.xlsx](../custo/apigw-vs-cloudfront.xlsx)
+calcula o custo mensal deste padrão e de uma CDN a partir do volume medido
+em produção: na aba **Consumo**, informe os dias cobertos e, por categoria
+de arquivo, downloads, tamanho médio, % com `HEAD` e % de requisições
+extras; o resultado sai na aba **Comparativo**. Preços e parâmetros ficam
+na aba **Premissas** (us-east-1, conferidos em 2026-09-13 — revisar para a
+região e a data da decisão).
+
+O que o modelo considera:
+
+- **API Gateway:** requisições por bloco (teto de 10 MB, bloco de 8 MiB),
+  transferência para a internet em faixas, um `GET`/`HEAD` no S3 por
+  requisição (sem cache) e o Lambda authorizer nas requisições que não
+  acertam o cache do authorizer.
+- **CloudFront sob demanda:** uma requisição por arquivo, free tier de
+  1 TB e 10 milhões de requisições por mês, transferência em faixas e
+  `GET` no S3 só nos cache-miss.
+- **CloudFront plano fixo:** o menor plano cujos limites comportam o
+  volume (referência — não verificado se os planos atendem mTLS).
+
+Leitura geral:
+
+- **Custo marginal por GB é equivalente** nas duas opções sob demanda
+  (~$0,09 x ~$0,085 na primeira faixa). Requisições, leituras no S3 e
+  authorizer somam centavos por milhar de downloads.
+- **Em volume baixo, o free tier de 1 TB do CloudFront pesa** na
+  comparação: com os valores de exemplo da planilha (~1,8 TB/mês), o API
+  Gateway sai ~$165/mês contra ~$62/mês no CloudFront sob demanda, e a
+  diferença de ~$100/mês é basicamente o free tier. Em volumes maiores a
+  razão se aproxima de 1.
+- **Em volume alto, os planos fixos de CDN abrem distância** (ex.: Pro a
+  $15/mês até 50 TB) — vantagem que a variante CDN não consegue usar hoje
+  pela exigência de validação online (ver "Alternativas consideradas").
+
 ## Alternativas consideradas
 
 | Alternativa | Avaliação |
@@ -171,6 +207,7 @@ bucket. Três elementos centrais:
 | **API Gateway → S3 direto (Service Proxy)** | ✅ Escolhida — sem compute no caminho de dados, custo mínimo, alinhada ao padrão de API Gateway já consolidado na organização |
 | API Gateway → compute (Lambda/ECS/EKS/etc.) → S3 (proxy integration) | Não escolhida pro caminho de dados — adiciona compute (custo + eventual cold start + limite de payload mais restritivo que o do API GW) sem necessidade, já que não há transformação de binário a fazer. Vale só pro caminho de dados; o fallback (cache-miss) já usa compute de propósito, ver "Decisão" |
 | URL pré-assinada do S3 entregue pelo BFF | Não aceita pela política atual de exposição de arquivos privados, apesar de dispensar o teto de 10 MB e ter range nativo |
+| CloudFront + viewer mTLS + S3 privado (OAC) | Não escolhida — o CloudFront valida o certificado contra um trust store, mas a validação do token e da **revogação do certificado de cliente** exige consulta online à infra de governança, o que o Lambda authorizer do API Gateway faz hoje. Na borda isso não cabe: CloudFront Functions não tem acesso à rede e Lambda@Edge não roda em VPC. Seria a opção natural (sem teto de 10 MB, cache na borda) se a validação pudesse ser offline. Custo comparado em "Custo" |
 | Fallback síncrono (compute responde `302` ao fim da cópia) | Não escolhido — amarra o tempo de cópia ao timeout de integração do API Gateway (29 s). Foi a primeira versão da PoC |
 | Cliente escolhe o tamanho de chunk (proposta inicial) | Substituída — exige o cliente conhecer/sincronizar um número "mágico" com o servidor; o servidor decidir o teto sozinho é mais simples e mais robusto (protege até clientes mal-comportados) |
 | Cache de erro só no CDN automático do API Gateway edge-optimized | Não se aplica — essa distribuição CloudFront é só roteamento de latência, não cacheia por `Cache-Control` (confirmado contra doc oficial). Optou-se por `Cache-Control` no cliente (sem custo) + decisão adiada sobre stage cache nativo do API Gateway (tem custo real, ~$15/mês) |
