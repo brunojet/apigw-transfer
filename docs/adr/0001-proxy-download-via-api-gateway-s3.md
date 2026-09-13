@@ -121,7 +121,13 @@ bucket. Três elementos centrais:
   que fica não é sobre o estado atual (já validado contra AWS real,
   funcionando) — é de processo: esse tipo de particularidade só aparece
   testando contra a AWS de verdade, não lendo a documentação; qualquer
-  mudança futura nessa VTL precisa do mesmo rigor de validação.
+  mudança futura nessa VTL precisa do mesmo rigor de validação. VTL não
+  tem test runner local — iterar numa mudança exige deploy real. Isso é
+  mitigado pela esteira de CI/CD já em uso na organização: além dos
+  testes unitários, há testes de aplicação integrados pós-deploy, e está
+  em construção um teste integrado ponta a ponta (incluindo obtenção de
+  token STS, mTLS e todo o caminho) — uma regressão nessa VTL seria
+  pega em tempo de deploy, não silenciosamente em produção.
 - `binary_media_types` mal configurado corrompe silenciosamente tanto
   corpo de erro (bloqueando VTL) quanto corpo binário de sucesso — é uma
   fonte de bugs sutis específica dessa abordagem (ver SPEC.md §5).
