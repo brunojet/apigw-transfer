@@ -36,15 +36,15 @@ variable "memory_size" {
 }
 
 variable "timeout" {
-  description = "Timeout da Lambda (segundos)"
+  description = "Timeout da Lambda (segundos) -- limita a duracao da copia assincrona; a requisicao do API Gateway so faz consultas rapidas"
   type        = number
-  default     = 30
+  default     = 300
 }
 
 variable "lock_ttl_seconds" {
-  description = "TTL do lock distribuido (segundos) -- deve ser < timeout"
+  description = "TTL do lock distribuido (segundos) -- deve ser >= timeout, senao o lock expira com a copia ainda em andamento"
   type        = number
-  default     = 20
+  default     = 360
 }
 
 variable "retry_after_seconds" {

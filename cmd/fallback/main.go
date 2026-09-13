@@ -3,22 +3,28 @@
 //
 // Chamado só quando o proxy direto (GET/HEAD /{key+}, API Gateway -> S3
 // Service Proxy, sem Lambda) responde 404 -- ver SPEC.md seção 2/4 e
-// PLAN.md. Este Lambda:
-//  1. Checa se o objeto já existe no path direto (barato, sem lock --
-//     cobre o caso comum de uma invocação concorrente já ter terminado).
-//  2. Se não existe, tenta o lock distribuído (S3) em UMA tentativa (não
-//     bloqueante). Se já está travado por outra invocação, responde
-//     202 + Retry-After na hora -- quem espera é o cliente (polling),
-//     sem custo de Lambda parada.
-//  3. Busca no prefixo "origin/" do mesmo bucket (origem simulada -- ver
-//     memória de projeto).
-//  4. Copia (streaming) pro path direto, sem prefixo.
-//  5. Libera o lock e redireciona (302) pro path direto -- o cliente
-//     refaz a chamada original, agora servida pelo proxy sem Lambda.
+// ADR 0001. Simula o fallback assíncrono do desenho final (lá executado
+// pelo BFF): a requisição nunca espera a cópia terminar.
+//
+// Requisição do API Gateway:
+//  1. Objeto já existe no path direto -> 302 pra ele (sem lock).
+//  2. Tenta o lock distribuído (S3) em UMA tentativa. Ocupado -> 202 +
+//     Retry-After.
+//  3. Com o lock: se o objeto não existe na origem ("origin/" do mesmo
+//     bucket) -> libera o lock e responde 404 cacheável.
+//  4. Senão dispara a cópia numa autoinvocação assíncrona
+//     (InvocationType Event), que fica dona do lock, e responde 202 +
+//     Retry-After -- inclusive pra quem pegou o lock.
+//
+// Invocação assíncrona ({"copyKey": ...}): copia origin/{key} -> {key} em
+// streaming e libera o lock. O cliente, repetindo a requisição original
+// depois do Retry-After, cai no passo 1 quando a cópia termina.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -31,6 +37,11 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/smithy-go"
 
 	storageadapters "github.com/brunojet/go-infra-adapters/v4/pkg/storage/aws/s3"
 	storagecontracts "github.com/brunojet/go-infra-adapters/v4/pkg/storage/contracts"
@@ -39,18 +50,25 @@ import (
 const (
 	defaultS3Bucket            = "brunojet-media-proxy-dev"
 	defaultOriginPrefix        = "origin/"
-	defaultLockTTL             = 45 // segundos -- deve ser < timeout da Lambda
-	defaultRetryAfterSecs      = 5  // segundos sugeridos ao cliente via Retry-After
-	defaultNotFoundMaxAgeSecs  = 60 // usado só se a stage variable estiver ausente/inválida
+	defaultLockTTL             = 360 // segundos -- deve ser >= timeout da Lambda (cobre a cópia assíncrona)
+	defaultRetryAfterSecs      = 5   // segundos sugeridos ao cliente via Retry-After
+	defaultNotFoundMaxAgeSecs  = 60  // usado só se a stage variable estiver ausente/inválida
 	notFoundMaxAgeStageVarName = "notFoundMaxAgeSeconds"
 )
 
 var (
 	bucket         storagecontracts.BucketAdapter
+	lambdaClient   *lambdasvc.Client
+	functionName   string
 	originPrefix   string
 	lockTTL        time.Duration
 	retryAfterSecs int
 )
+
+// copyJob é o payload da autoinvocação assíncrona que executa a cópia.
+type copyJob struct {
+	CopyKey string `json:"copyKey"`
+}
 
 func getEnvOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -80,52 +98,116 @@ func init() {
 		log.Fatalf("failed to create bucket adapter: %v", err)
 	}
 
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background())
+	if err != nil {
+		log.Fatalf("failed to load AWS config: %v", err)
+	}
+	lambdaClient = lambdasvc.NewFromConfig(cfg)
+	functionName = os.Getenv("AWS_LAMBDA_FUNCTION_NAME") // definida pelo runtime da Lambda
+
 	originPrefix = getEnvOrDefault("ORIGIN_PREFIX", defaultOriginPrefix)
 	lockTTL = time.Duration(getEnvIntOrDefault("LOCK_TTL_SECONDS", defaultLockTTL)) * time.Second
 	retryAfterSecs = getEnvIntOrDefault("RETRY_AFTER_SECONDS", defaultRetryAfterSecs)
 }
 
-// Handle is the Lambda handler entry point (API Gateway REST API proxy integration).
-func Handle(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+// Handle recebe tanto a requisição do API Gateway (integração aws_proxy)
+// quanto a autoinvocação assíncrona da cópia.
+func Handle(ctx context.Context, payload json.RawMessage) (any, error) {
+	var job copyJob
+	if err := json.Unmarshal(payload, &job); err == nil && job.CopyKey != "" {
+		runCopy(ctx, job.CopyKey)
+		// nil mesmo em falha: um retry automático da invocação assíncrona
+		// rodaria sem o lock (já liberado). O cliente reenvia a requisição e
+		// dispara uma nova cópia.
+		return nil, nil
+	}
+
+	var req events.APIGatewayProxyRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, fmt.Errorf("unexpected payload: %w", err)
+	}
+	return handleRequest(ctx, req), nil
+}
+
+func handleRequest(ctx context.Context, req events.APIGatewayProxyRequest) events.APIGatewayProxyResponse {
 	key := req.PathParameters["key"]
 	if key == "" {
-		return errorResponse(http.StatusBadRequest, "missing key path parameter"), nil
+		return errorResponse(http.StatusBadRequest, "missing key path parameter")
 	}
 
 	stage := req.RequestContext.Stage
 
-	// Caminho comum: outra invocação já terminou -- responde sem tocar no lock.
+	// Caminho comum: a cópia já terminou -- responde sem tocar no lock.
 	if alreadyExists(ctx, key) {
-		return redirectToDirectPath(stage, key), nil
+		return redirectToDirectPath(stage, key)
 	}
 
-	// Tentativa única, não bloqueante. Se já travado, devolve a espera pro
-	// cliente (Retry-After) em vez de segurar a Lambda esperando. Qualquer
-	// OUTRO erro (permissão, rede, etc.) não é "está ocupado" -- é um erro
-	// de verdade, que esperar não resolve (ver memória de projeto).
+	// Tentativa única, não bloqueante. Qualquer erro que não seja "lock
+	// ocupado" (permissão, rede) é erro de verdade, não motivo pra esperar.
 	if lockErr := bucket.GetLock(ctx, key, lockTTL); lockErr != nil {
 		if storageadapters.IsLockHeld(lockErr) {
-			return retryLaterResponse(fmt.Sprintf("fetch already in progress for %s", key)), nil
+			return retryLaterResponse(fmt.Sprintf("fetch already in progress for %s", key))
 		}
-		return errorResponse(http.StatusInternalServerError, fmt.Sprintf("lock acquire failed for %s: %v", key, lockErr)), nil
+		return errorResponse(http.StatusInternalServerError, fmt.Sprintf("lock acquire failed for %s: %v", key, lockErr))
 	}
+
+	// A partir daqui o lock é nosso até ser entregue à cópia assíncrona.
+	handedOff := false
 	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if releaseErr := bucket.ReleaseLock(releaseCtx, key); releaseErr != nil {
-			log.Printf("lock release failed for %s: %v", key, releaseErr)
+		if !handedOff {
+			releaseLock(key)
 		}
 	}()
 
 	// Corrida: pode ter sido populado entre a checagem acima e o lock.
 	if alreadyExists(ctx, key) {
-		return redirectToDirectPath(stage, key), nil
+		return redirectToDirectPath(stage, key)
 	}
+
+	originKey := originPrefix + key
+	found, err := objectExists(ctx, originKey)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, fmt.Sprintf("origin lookup failed for %s: %v", originKey, err))
+	}
+	if !found {
+		return notFoundInOriginResponse(req, originKey)
+	}
+
+	if err := dispatchCopy(ctx, key); err != nil {
+		return errorResponse(http.StatusInternalServerError, fmt.Sprintf("dispatch copy failed for %s: %v", key, err))
+	}
+	handedOff = true
+	return retryLaterResponse(fmt.Sprintf("fetch started for %s", key))
+}
+
+// dispatchCopy dispara a cópia numa invocação assíncrona desta mesma
+// função. Trabalho em goroutine não serve: nada garante que o container
+// continue executando depois que o handler retorna.
+func dispatchCopy(ctx context.Context, key string) error {
+	payload, err := json.Marshal(copyJob{CopyKey: key})
+	if err != nil {
+		return err
+	}
+	_, err = lambdaClient.Invoke(ctx, &lambdasvc.InvokeInput{
+		FunctionName:   aws.String(functionName),
+		InvocationType: lambdatypes.InvocationTypeEvent,
+		Payload:        payload,
+	})
+	return err
+}
+
+// runCopy copia origin/{key} -> {key} e libera o lock recebido de
+// handleRequest. O TTL do lock (>= timeout da função) cobre o caso de a
+// invocação morrer antes do defer.
+func runCopy(ctx context.Context, key string) {
+	defer releaseLock(key)
+	start := time.Now()
 
 	originKey := originPrefix + key
 	obj := &storagecontracts.BucketObject{}
 	if err := bucket.GetObject(ctx, originKey, obj); err != nil {
-		return notFoundInOriginResponse(req, originKey), nil
+		log.Printf("COPY ERROR: get %s: %v", originKey, err)
+		return
 	}
 	defer func() {
 		if closeErr := obj.Close(); closeErr != nil {
@@ -138,23 +220,41 @@ func Handle(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIG
 		contentType = "application/octet-stream"
 	}
 
-	putErr := bucket.PutObject(ctx, &storagecontracts.BucketObject{
-		Info: storagecontracts.ObjectInfo{
-			Key:         key,
-			ContentType: contentType,
-		},
+	if err := bucket.PutObject(ctx, &storagecontracts.BucketObject{
+		Info: storagecontracts.ObjectInfo{Key: key, ContentType: contentType},
 		Body: obj.Body,
-	})
-	if putErr != nil {
-		return errorResponse(http.StatusInternalServerError, fmt.Sprintf("upload failed for %s: %v", key, putErr)), nil
+	}); err != nil {
+		log.Printf("COPY ERROR: put %s: %v", key, err)
+		return
 	}
+	log.Printf("COPY OK: %s -> %s in %s", originKey, key, time.Since(start).Round(time.Millisecond))
+}
 
-	return redirectToDirectPath(stage, key), nil
+func releaseLock(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := bucket.ReleaseLock(ctx, key); err != nil {
+		log.Printf("lock release failed for %s: %v", key, err)
+	}
 }
 
 func alreadyExists(ctx context.Context, key string) bool {
-	info := &storagecontracts.ObjectInfo{}
-	return bucket.HeadObject(ctx, key, info) == nil
+	found, _ := objectExists(ctx, key)
+	return found
+}
+
+// objectExists distingue "não existe" (false, nil) de falha na consulta
+// (false, err) -- só o primeiro justifica um 404 cacheável.
+func objectExists(ctx context.Context, key string) (bool, error) {
+	err := bucket.HeadObject(ctx, key, &storagecontracts.ObjectInfo{})
+	if err == nil {
+		return true, nil
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
+		return false, nil
+	}
+	return false, err
 }
 
 // redirectToDirectPath aponta o cliente de volta pro proxy direto
@@ -174,25 +274,16 @@ func redirectToDirectPath(stage, key string) events.APIGatewayProxyResponse {
 	}
 }
 
-// retryLaterResponse sinaliza pro cliente que o fetch já está em
-// andamento (outra invocação segura o lock) e ele deve tentar de novo
-// depois de Retry-After segundos. 202 Accepted: o pedido foi entendido,
-// só ainda não terminou -- mais preciso que 503 (que soa como falha) ou
-// 429 (que soa como rate limit, não é o caso aqui). Evita a Lambda ficar
-// bloqueada esperando o lock liberar.
+// retryLaterResponse sinaliza que a cópia está em andamento (iniciada
+// agora ou por outra requisição) e o cliente deve repetir a requisição
+// original depois de Retry-After segundos. 202 Accepted: o pedido foi
+// aceito, só ainda não terminou -- mais preciso que 503 (falha) ou 429
+// (rate limit).
 //
-// Cache-Control usa o MESMO valor de Retry-After (não uma constante
-// separada) de propósito: os dois headers prometem a mesma coisa ("essa
-// resposta vale por N segundos"), então usar a mesma variável garante que
-// nunca ficam dessincronizados se alguém mudar RETRY_AFTER_SECONDS. Isso
-// protege contra estouro de manada -- vários clientes perguntando pela
-// mesma key popular enquanto ela está sendo populada -- sem custo de
-// infra: um cliente bem-comportado já ia esperar esses N segundos de
-// qualquer jeito antes de perguntar de novo; cachear só evita que outros
-// clientes (ou um mal-comportado) reconsultem a Lambda antes da hora. O
-// único custo é um cliente raro receber esse 202 cacheado por até N
-// segundos a mais mesmo se o lock já tiver liberado antes disso -- atraso
-// máximo de N segundos, não um erro.
+// Cache-Control usa o MESMO valor de Retry-After de propósito: os dois
+// headers prometem a mesma coisa ("essa resposta vale por N segundos").
+// Protege contra estouro de manada numa key popular sendo populada; o
+// custo máximo é um cliente esperar até N segundos a mais.
 func retryLaterResponse(detail string) events.APIGatewayProxyResponse {
 	log.Printf("RETRY: %s", detail)
 	return events.APIGatewayProxyResponse{
@@ -207,19 +298,10 @@ func retryLaterResponse(detail string) events.APIGatewayProxyResponse {
 }
 
 // notFoundInOriginResponse responde 404 quando a key não existe nem na
-// origem simulada. Diferente dos outros erros deste handler (falha de
-// lock/permissão/rede, upload -- todos transitórios, podem funcionar na
-// próxima tentativa), este caso NÃO muda sozinho: só um humano populando
-// origin/{key} resolve. Por isso é a ÚNICA resposta com Cache-Control:
-// max-age -- protege contra clientes (de qualquer app, agregado) batendo
-// repetidamente numa key que sabemos que vai continuar falhando, sem
-// custo de infra (é só um header; cache de fato, se algum dia justificar
-// o custo, é decisão separada -- ver SPEC.md). O valor vem de uma stage
-// variable (notFoundMaxAgeSeconds), não de env var/redeploy, pelo mesmo
-// motivo do maxChunkBytes do apigw_s3_proxy: ajustável sem tocar no
-// código. As respostas transitórias (500) e o 202 (lock ocupado) NÃO
-// ganham esse header de propósito -- cachear uma falha transitória
-// estenderia a indisponibilidade além do problema real.
+// origem simulada. Diferente dos erros transitórios (lock, permissão,
+// rede), este caso não muda sozinho, por isso é a única resposta de erro
+// com Cache-Control: max-age. O valor vem da stage variable
+// notFoundMaxAgeSeconds, ajustável sem redeploy.
 func notFoundInOriginResponse(req events.APIGatewayProxyRequest, originKey string) events.APIGatewayProxyResponse {
 	detail := fmt.Sprintf("object not found in origin: %s", originKey)
 	log.Printf("ERROR: %d - %s", http.StatusNotFound, detail)

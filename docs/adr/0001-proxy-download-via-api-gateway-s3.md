@@ -63,8 +63,11 @@ bucket. Três elementos centrais:
    timeout de integração (29 s); quanto esperar fica a cargo do cliente.
    O lock no S3 evita cópias duplicadas; seu TTL precisa cobrir a cópia
    mais longa esperada e é o que libera a key se o processo morrer sem
-   liberar o lock. Esta PoC usa uma Lambda síncrona (`cmd/fallback`)
-   apenas para validar o fluxo.
+   liberar o lock. Esta PoC simula o mesmo comportamento com uma Lambda
+   (`cmd/fallback`) que responde `202` e executa a cópia numa
+   autoinvocação assíncrona — validado contra AWS real com um objeto de
+   ~109 MB (cópia em background de ~7 s, cliente recebendo `202` até o
+   objeto existir, SHA-256 idêntico).
 3. **Configuração via stage variables, não hardcoded no contrato.** Bucket
    alvo, teto de chunk e tempo de cache de erros ficam em variáveis do
    stage do API Gateway, não embutidas no corpo da API — ajustá-los não
@@ -168,7 +171,7 @@ bucket. Três elementos centrais:
 | **API Gateway → S3 direto (Service Proxy)** | ✅ Escolhida — sem compute no caminho de dados, custo mínimo, alinhada ao padrão de API Gateway já consolidado na organização |
 | API Gateway → compute (Lambda/ECS/EKS/etc.) → S3 (proxy integration) | Não escolhida pro caminho de dados — adiciona compute (custo + eventual cold start + limite de payload mais restritivo que o do API GW) sem necessidade, já que não há transformação de binário a fazer. Vale só pro caminho de dados; o fallback (cache-miss) já usa compute de propósito, ver "Decisão" |
 | URL pré-assinada do S3 entregue pelo BFF | Não aceita pela política atual de exposição de arquivos privados, apesar de dispensar o teto de 10 MB e ter range nativo |
-| Fallback síncrono (compute responde `302` ao fim da cópia) | Não escolhido para a solução final — amarra o tempo de cópia ao timeout de integração do API Gateway (29 s); usado só na PoC |
+| Fallback síncrono (compute responde `302` ao fim da cópia) | Não escolhido — amarra o tempo de cópia ao timeout de integração do API Gateway (29 s). Foi a primeira versão da PoC |
 | Cliente escolhe o tamanho de chunk (proposta inicial) | Substituída — exige o cliente conhecer/sincronizar um número "mágico" com o servidor; o servidor decidir o teto sozinho é mais simples e mais robusto (protege até clientes mal-comportados) |
 | Cache de erro só no CDN automático do API Gateway edge-optimized | Não se aplica — essa distribuição CloudFront é só roteamento de latência, não cacheia por `Cache-Control` (confirmado contra doc oficial). Optou-se por `Cache-Control` no cliente (sem custo) + decisão adiada sobre stage cache nativo do API Gateway (tem custo real, ~$15/mês) |
 
