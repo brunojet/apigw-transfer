@@ -62,7 +62,9 @@ paths:
           headers:
             Content-Type: { schema: { type: "string" } }
         "412":
-          description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
+          description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md) -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
         "416":
           description: "Range alem do fim do objeto -- corpo generico, sem o XML do S3"
           headers:
@@ -174,6 +176,10 @@ paths:
                 #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
           "412":
             statusCode: "412"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":412,"detail":"precondition failed"}'
           "416":
             statusCode: "416"
             responseParameters:
