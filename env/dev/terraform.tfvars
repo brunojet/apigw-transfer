@@ -1,6 +1,5 @@
 aws_region      = "us-east-1"
 bucket_name     = "brunojet-media-proxy-dev"
-test_object_key = "servicenow-zurich-platform-security-ptbr.pdf"
 api_name        = "apigw-transfer-dev"
 stage_name      = "dev"
 

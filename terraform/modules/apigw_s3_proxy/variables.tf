@@ -23,15 +23,9 @@ variable "bucket_arn" {
   type        = string
 }
 
-variable "object_key" {
-  description = "Key do objeto de teste — a IAM role da API Gateway só recebe s3:GetObject/s3:HeadObject para esta key, não para o bucket inteiro"
-  type        = string
-}
-
-variable "missing_object_key" {
-  description = "Key que deliberadamente NÃO existe no bucket, usada só para validar o mapeamento 404 -> 302 (S3 responde 404 de verdade, não 403, porque a IAM libera esta key também)"
-  type        = string
-  default     = "apigw-transfer-poc-404-test-do-not-create.bin"
+variable "file_delivery_ids" {
+  description = "Valores aceitos de fileDeliveryId (ex.: image, apk): viram o enum do parametro no contrato e os prefixos \"{fileDeliveryId}/\" com permissao de leitura no S3"
+  type        = list(string)
 }
 
 variable "binary_media_types" {
@@ -63,7 +57,8 @@ variable "notfound_max_age_seconds" {
 variable "max_chunk_bytes" {
   description = <<-EOT
     Offset maximo somado ao inicio do range (implicito ou pedido pelo
-    cliente) em GET /{key+} -- o tamanho real do chunk devolvido e' este
+    cliente) em GET /files-delivery/{fileDeliveryId}/files/{fileId} -- o
+    tamanho real do chunk devolvido e' este
     valor + 1 byte. O servidor sempre injeta/ajusta o Range antes de
     repassar ao S3 (ver openapi.yaml.tftpl), entao nenhuma resposta passa
     desse teto, mesmo que o cliente peca mais ou nao mande Range nenhum.
@@ -77,13 +72,8 @@ variable "max_chunk_bytes" {
   default     = 8388607
 }
 
-variable "fallback_test_object_key" {
-  description = "Key de teste do fluxo de fallback -- liberada no proxy direto tambem, pra o cliente conseguir ler depois que a Lambda popular"
-  type        = string
-}
-
 variable "fallback_lambda_invoke_arn" {
-  description = "Invoke ARN da Lambda de fallback (aws_lambda_function.invoke_arn), usado no path /fallback/{key+}"
+  description = "Invoke ARN da Lambda de fallback (aws_lambda_function.invoke_arn), usado nas rotas /files-delivery/{fileDeliveryId}/retrievals/{retrievalId}"
   type        = string
 }
 

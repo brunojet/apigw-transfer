@@ -10,16 +10,24 @@ variable "bucket_name" {
   default     = "brunojet-media-proxy-dev"
 }
 
-variable "test_object_key" {
-  description = "Key do objeto de teste no bucket, usada para escopar a IAM role da API Gateway e montar a invoke URL de saída"
-  type        = string
-  default     = "servicenow-zurich-platform-security-ptbr.pdf"
+variable "file_deliveries" {
+  description = "Canais de entrega por fileDeliveryId e o Cache-Control gravado no objeto (repassado nas respostas de files). Imagens são imutáveis por fileId (cache longo); APK não é cacheado."
+  type = map(object({
+    cache_control = string
+  }))
+  default = {
+    image = { cache_control = "private, max-age=2592000, immutable" }
+    apk   = { cache_control = "no-store" }
+  }
 }
 
-variable "missing_object_key" {
-  description = "Key que deliberadamente NÃO existe no bucket -- só pra validar o mapeamento 404 -> 302 (S3 responde 404 real, não 403)"
-  type        = string
-  default     = "apigw-transfer-poc-404-test-do-not-create.bin"
+variable "test_file_ids" {
+  description = "fileId de teste por canal, usados só nos outputs de URL. Os objetos são semeados manualmente em origin/{fileDeliveryId}/{fileId} (aws s3 cp, fora do Terraform)"
+  type        = map(string)
+  default = {
+    image = "5f2c9a1be3d04c7a9e1f6b8d2a4c7e90"
+    apk   = "9b1e7d3c5a2f4e6b8c0d1a3e5f7b9c2d"
+  }
 }
 
 variable "api_name" {
@@ -63,7 +71,7 @@ variable "notfound_max_age_seconds" {
 }
 
 variable "max_chunk_bytes" {
-  description = "Offset máximo do range em GET /{key+} -- chunk real = valor + 1 byte. O servidor sempre injeta/ajusta o Range (nunca deixa passar deste teto). Lido em runtime via stage variable, sem redeploy. Default 8388607 = 8MiB - 1 (já validado end-to-end)."
+  description = "Offset máximo do range em GET .../files/{fileId} -- chunk real = valor + 1 byte. O servidor sempre injeta/ajusta o Range (nunca deixa passar deste teto). Lido em runtime via stage variable, sem redeploy. Default 8388607 = 8MiB - 1 (já validado end-to-end)."
   type        = number
   default     = 8388607
 }
@@ -72,12 +80,6 @@ variable "origin_prefix" {
   description = "Prefixo no bucket usado como origem simulada pela Lambda de fallback (mesmo bucket, ver memoria de projeto)"
   type        = string
   default     = "origin/"
-}
-
-variable "fallback_test_object_key" {
-  description = "Key de teste para o fluxo de fallback -- ausente na raiz, semeada manualmente em origin/ (aws s3 cp, fora do Terraform)"
-  type        = string
-  default     = "apigw-transfer-fallback-test.bin"
 }
 
 variable "fallback_lambda_function_name" {

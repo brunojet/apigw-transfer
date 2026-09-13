@@ -8,13 +8,13 @@ import okhttp3.Response
 import java.io.IOException
 
 /**
- * Espera o Retry-After e repete a MESMA requisicao quando o /fallback/{key}
+ * Espera o Retry-After e repete a MESMA requisicao quando o .../retrievals/{retrievalId}
  * responde 202 (lock ja tomado por outra chamada). Nao trata redirect --
  * o OkHttp ja segue 302 sozinho por padrao (Location vem totalmente
  * resolvido pelo servidor via VTL, ver docs/client-behavior.md secao 3),
  * entao esse interceptor so cobre o que o OkHttp nao resolve nativamente.
- * Decisao de design: retenta a URL ORIGINAL (nao guarda o /fallback/{key}
- * a parte) -- ela cai de novo no 404->302->fallback ate resolver, igual ao
+ * Decisao de design: retenta a URL ORIGINAL (nao guarda a rota retrievals
+ * a parte) -- ela cai de novo em files -> 302 -> retrievals ate resolver, igual ao
  * wrapper request() de scripts/download_range.py.
  *
  * A espera bloqueia a thread da chamada. Com execute() num worker de

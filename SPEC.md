@@ -88,6 +88,19 @@ diretamente com o S3 para cada requisição.
 
 ## 4. Fluxo de requisição
 
+> **Rotas atuais** (padrão de endpoints da companhia): o caminho direto
+> `/{key+}` e o fallback `/fallback/{key}` citados neste documento viraram
+>
+> ```
+> GET/HEAD /files-delivery/{fileDeliveryId}/files/{fileId}            (S3: {fileDeliveryId}/{fileId})
+> GET/HEAD /files-delivery/{fileDeliveryId}/retrievals/{retrievalId}  (fallback; retrievalId = fileId)
+> ```
+>
+> com `fileDeliveryId` ∈ {`image`, `apk`}. O mecanismo (clamp de `Range`,
+> mapeamento de erros, redirect, lock, cópia assíncrona) não mudou; o
+> `Cache-Control` de `files` vem do metadado gravado pela cópia conforme o
+> canal. Contrato normativo em [docs/client-behavior.md](docs/client-behavior.md).
+
 Fluxo testado nesta rodada (sem mTLS/token — ver seção 2):
 
 ```
