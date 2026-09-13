@@ -57,12 +57,12 @@ paths:
           headers:
             Location: { schema: { type: "string" } }
             Cache-Control: { schema: { type: "string" } }
-        "412":
-          description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
         "403":
           description: "acesso negado pelo S3 (key fora da permissao da role) -- corpo generico, sem o XML do S3"
           headers:
             Content-Type: { schema: { type: "string" } }
+        "412":
+          description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
         "416":
           description: "Range alem do fim do objeto -- corpo generico, sem o XML do S3"
           headers:
@@ -125,16 +125,6 @@ paths:
             ## original (SPEC.md §9).
             #set($context.requestOverride.header.Range = "bytes=$${rangeStart}-$${rangeEnd}")
         responses:
-          # "default" (sem selectionPattern) pega QUALQUER status nao listado
-          # abaixo -- por isso e' erro (502), nunca 200. Antes, 403/416/5xx
-          # do S3 saiam como 200 com o XML de erro no corpo (que ainda expoe
-          # conta e ARN da role). Erros usam corpo JSON generico.
-          default:
-            statusCode: "502"
-            responseParameters:
-              method.response.header.Content-Type: "'application/json'"
-            responseTemplates:
-              $default: '{"status":502,"detail":"upstream error"}'
           "200":
             statusCode: "200"
             responseParameters:
@@ -142,18 +132,6 @@ paths:
               method.response.header.Content-Length: "integration.response.header.Content-Length"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
-          "403":
-            statusCode: "403"
-            responseParameters:
-              method.response.header.Content-Type: "'application/json'"
-            responseTemplates:
-              $default: '{"status":403,"detail":"access denied"}'
-          "416":
-            statusCode: "416"
-            responseParameters:
-              method.response.header.Content-Type: "'application/json'"
-            responseTemplates:
-              $default: '{"status":416,"detail":"requested range not satisfiable"}'
           "206":
             statusCode: "206"
             responseParameters:
@@ -162,8 +140,12 @@ paths:
               method.response.header.Content-Range: "integration.response.header.Content-Range"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
-          "412":
-            statusCode: "412"
+          "403":
+            statusCode: "403"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":403,"detail":"access denied"}'
           "404":
             statusCode: "302"
             responseParameters:
@@ -189,6 +171,24 @@ paths:
               $default: |
                 #set($key = $input.params('key'))
                 #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
+          "412":
+            statusCode: "412"
+          "416":
+            statusCode: "416"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":416,"detail":"requested range not satisfiable"}'
+          # "default" (sem selectionPattern) pega QUALQUER status nao listado
+          # acima -- por isso e' erro (502), nunca 200. Antes, 403/416/5xx
+          # do S3 saiam como 200 com o XML de erro no corpo (que ainda expoe
+          # conta e ARN da role). Erros usam corpo JSON generico.
+          default:
+            statusCode: "502"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":502,"detail":"upstream error"}'
     head:
       parameters:
         - name: "key"
@@ -222,12 +222,6 @@ paths:
         requestParameters:
           integration.request.path.key: "method.request.path.key"
         responses:
-          # Mesmo raciocinio do GET: "default" e' o catch-all de erro, nao
-          # sucesso. HEAD nao tem corpo, entao so o status importa.
-          default:
-            statusCode: "502"
-          "403":
-            statusCode: "403"
           "200":
             statusCode: "200"
             responseParameters:
@@ -235,6 +229,8 @@ paths:
               method.response.header.Content-Length: "integration.response.header.Content-Length"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
+          "403":
+            statusCode: "403"
           "404":
             statusCode: "302"
             responseParameters:
@@ -260,6 +256,10 @@ paths:
               $default: |
                 #set($key = $input.params('key'))
                 #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
+          # Mesmo raciocinio do GET: "default" e' o catch-all de erro, nao
+          # sucesso. HEAD nao tem corpo, entao so o status importa.
+          default:
+            statusCode: "502"
   "/fallback/{key+}":
     get:
       parameters:
