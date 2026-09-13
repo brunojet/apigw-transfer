@@ -166,41 +166,24 @@ bucket. Três elementos centrais:
 
 ## Custo
 
+O custo desta solução é dominado pela **transferência de dados para a
+internet** — os bytes entregues aos clientes. Requisições ao API Gateway,
+leituras no S3 e o authorizer são marginais em comparação. É um custo
+proporcional ao uso, sem compute no caminho de dados, e depende de três
+fatores:
+
+- **Volume transferido**, principalmente de APKs (imagens pesam pouco e
+  podem ser cacheadas no dispositivo, já que o conteúdo por `sys_id` não
+  muda).
+- **Preço por GB da região de produção** (sa-east-1, escolhida pela
+  latência).
+- **Preço negociado com a AWS**, se a organização tiver acordo corporativo
+  (EDP).
+
 A planilha [docs/custo/apigw-vs-cloudfront.xlsx](../custo/apigw-vs-cloudfront.xlsx)
-calcula o custo mensal deste padrão e de uma CDN a partir do volume medido
-em produção: na aba **Consumo**, informe os dias cobertos e, por categoria
-de arquivo, downloads, tamanho médio, % com `HEAD` e % de requisições
-extras; o resultado sai na aba **Comparativo**. Preços e parâmetros ficam
-na aba **Premissas** (API Gateway, S3 e Lambda em **sa-east-1**, região de
-produção escolhida pela latência; CloudFront com usuários na América do
-Sul; preços conferidos em 2026-09-13 — revisar na data da decisão).
-
-O que o modelo considera:
-
-- **API Gateway:** requisições por bloco (teto de 10 MB, bloco de 8 MiB),
-  transferência para a internet em faixas, um `GET`/`HEAD` no S3 por
-  requisição (sem cache) e o Lambda authorizer nas requisições que não
-  acertam o cache do authorizer.
-- **CloudFront sob demanda:** uma requisição por arquivo, free tier de
-  1 TB e 10 milhões de requisições por mês, transferência em faixas e
-  `GET` no S3 só nos cache-miss.
-- **CloudFront plano fixo:** o menor plano cujos limites comportam o
-  volume (referência — não verificado se os planos atendem mTLS).
-
-Leitura geral:
-
-- **A conta é dominada pela transferência de dados** (~99% nas duas
-  opções); requisições, S3 e authorizer somam dezenas de dólares.
-- **Em sa-east-1 o API Gateway custa mais.** A saída de dados de São Paulo
-  custa $0,150/GB na primeira faixa, contra $0,110/GB nos edges do
-  CloudFront na América do Sul. Com a estimativa inicial da planilha
-  (~30 TB/mês, dominado por APKs): API Gateway ~$4.380/mês contra
-  CloudFront ~$3.140/mês (~1,4x). É o custo da exigência de governança
-  (validação online), não uma escolha técnica.
-- **Plano fixo de CDN seria muito mais barato** (o volume cabe no Pro,
-  $15/mês até 50 TB), mas não foi verificado se o plano atende os
-  requisitos, e a variante CDN esbarra na validação online exigida pela
-  governança (ver "Alternativas consideradas").
+calcula o custo mensal a partir do volume medido e também o compara com
+uma CDN. **Os valores serão definidos com dados de produção**, usando o
+custo atual da infraestrutura de distribuição do LDM como referência.
 
 ## Alternativas consideradas
 
@@ -209,7 +192,7 @@ Leitura geral:
 | **API Gateway → S3 direto (Service Proxy)** | ✅ Escolhida — sem compute no caminho de dados, custo mínimo, alinhada ao padrão de API Gateway já consolidado na organização |
 | API Gateway → compute (Lambda/ECS/EKS/etc.) → S3 (proxy integration) | Não escolhida pro caminho de dados — adiciona compute (custo + eventual cold start + limite de payload mais restritivo que o do API GW) sem necessidade, já que não há transformação de binário a fazer. Vale só pro caminho de dados; o fallback (cache-miss) já usa compute de propósito, ver "Decisão" |
 | URL pré-assinada do S3 entregue pelo BFF | Não aceita pela política atual de exposição de arquivos privados, apesar de dispensar o teto de 10 MB e ter range nativo |
-| CloudFront + viewer mTLS + S3 privado (OAC) | Não escolhida — o CloudFront valida o certificado contra um trust store, mas a validação do token e da **revogação do certificado de cliente** exige consulta online à infra de governança, o que o Lambda authorizer do API Gateway faz hoje. Na borda isso não cabe: CloudFront Functions não tem acesso à rede e Lambda@Edge não roda em VPC. Seria a opção natural (sem teto de 10 MB, cache na borda) se a validação pudesse ser offline. Custo comparado em "Custo" |
+| CloudFront + viewer mTLS + S3 privado (OAC) | Não escolhida — o CloudFront valida o certificado contra um trust store, mas a validação do token e da **revogação do certificado de cliente** exige consulta online à infra de governança, o que o Lambda authorizer do API Gateway faz hoje. Na borda isso não cabe: CloudFront Functions não tem acesso à rede e Lambda@Edge não roda em VPC. Seria a opção natural (sem teto de 10 MB, cache na borda) se a validação pudesse ser offline |
 | Fallback síncrono (compute responde `302` ao fim da cópia) | Não escolhido — amarra o tempo de cópia ao timeout de integração do API Gateway (29 s). Foi a primeira versão da PoC |
 | Cliente escolhe o tamanho de chunk (proposta inicial) | Substituída — exige o cliente conhecer/sincronizar um número "mágico" com o servidor; o servidor decidir o teto sozinho é mais simples e mais robusto (protege até clientes mal-comportados) |
 | Cache de erro só no CDN automático do API Gateway edge-optimized | Não se aplica — essa distribuição CloudFront é só roteamento de latência, não cacheia por `Cache-Control` (confirmado contra doc oficial). Optou-se por `Cache-Control` no cliente (sem custo) + decisão adiada sobre stage cache nativo do API Gateway (tem custo real, ~$15/mês) |
