@@ -193,12 +193,10 @@ stage). Isso quebrou silenciosamente o redirect dinâmico do cache-miss
 proxy. Ver `env/dev/terraform.tfvars` e memória de projeto para o
 histórico completo do diagnóstico.
 
-**Achado adicional — compressão (gzip) do API Gateway, deliberadamente
-desabilitada:** o atributo `minimum_compression_size` do
-`aws_api_gateway_rest_api` não está configurado neste projeto (não é
-"esquecido", é intencional). `Range`/`Content-Encoding` operam em
-**camadas diferentes e independentes**, e é importante isolar isso pra
-não confundir os dois:
+**Achado adicional — compressão (gzip) do API Gateway, habilitada como
+opt-in (`minimum_compression_size = 8192`):** `Range`/`Content-Encoding`
+operam em **camadas diferentes e independentes**, e é importante isolar
+isso pra não confundir os dois:
 
 - **Camada do range (seleção):** decide *quais bytes* do objeto
   original (tal como armazenado no S3) fazem parte desta resposta. É
@@ -223,23 +221,35 @@ fazem `requests`, `OkHttp` e browsers — `urllib` puro não decodifica
 sozinho, mas também não manda `Accept-Encoding: gzip` por padrão, então
 nem aciona a compressão nesse caso).
 
-Os motivos reais pra manter desabilitado são outros:
-- PDF e imagem já são formatos comprimidos de forma consistente — gzip
-  por cima não reduz quase nada, só adiciona processamento sem ganho.
-  APK é mais nuançado: é um ZIP, e algumas entradas (ex.: bibliotecas
-  nativas `.so`, quando o build usa `extractNativeLibs=false`, ou
-  assets marcados `noCompress`) são armazenadas com `STORE` (sem
-  compressão) de propósito, pra permitir `mmap` direto — nesses trechos
-  específicos gzip até compensaria. Mas isso é opaco pro proxy (não
-  inspecionamos a estrutura interna do zip, só repassamos bytes brutos
-  do S3) — não dá pra decidir compressão por trecho, só pra API inteira,
-  e o motivo abaixo pesa mais que esse ganho parcial e imprevisível.
-- Depende de **toda** lib de cliente decodificar `Content-Encoding`
-  corretamente. Um cliente com implementação HTTP mínima que manda
-  `Accept-Encoding: gzip` mas não decodifica sozinho receberia bytes
-  comprimidos crus e corromperia o chunk silenciosamente, sem sinal de
-  erro — risco desnecessário pra um ganho que já é ~zero no primeiro
-  ponto.
+**Validado empiricamente contra o endpoint real** (chunk de 8MiB do PDF
+de teste, `bytes=0-8388607`):
+
+| Requisição | `Content-Encoding` | Bytes na rede | Íntegro? |
+| :---- | :---- | :---- | :---- |
+| sem `Accept-Encoding` | — | 8.388.608 | baseline |
+| `curl --compressed` (nego­cia e descompacta sozinho) | `deflate` | 7.223.243 | ✅ MD5 idêntico ao baseline |
+| `Accept-Encoding: gzip` na mão, sem descompactar | `gzip` | 7.223.255 | bytes crus (`1f 8b...`) — cliente que não decodifica recebe isto |
+
+Correção importante em relação à suposição original deste documento: o
+ganho **não é "quase zero"** — deu **~14% de redução** (8.39MB → 7.22MB).
+PDF mistura streams já comprimidos com estrutura interna não comprimida
+(xref, dicionários de objeto), então gzip por cima ainda captura algo.
+APK continua um caso à parte: é um ZIP, e entradas armazenadas com
+`STORE` (ex.: `.so` com `extractNativeLibs=false`, assets `noCompress`)
+comprimiriam bem com gzip por cima, mas isso é opaco pro proxy (não
+inspecionamos a estrutura interna do zip) — não muda a decisão abaixo.
+
+O motivo real pra manter isso **opt-in** (nunca forçado) é outro, e
+continua valendo com o número real: depende de **toda** lib de cliente
+decodificar `Content-Encoding` corretamente. Um cliente com
+implementação HTTP mínima que manda `Accept-Encoding: gzip` mas não
+decodifica sozinho recebe bytes comprimidos crus e corrompe o chunk
+silenciosamente, sem sinal de erro — confirmado na tabela acima e
+reproduzido de forma independente com `urllib.request` puro (Python) em
+[go-infra-adapters](../go-infra-adapters) (`resp.read()` devolve os
+bytes gzip crus, sem descompactar). Isso vira requisito obrigatório do
+contrato do cliente: só mandar `Accept-Encoding` se a lib também
+decodifica `Content-Encoding` — ver `docs/client-behavior.md`.
 
 ## 6. Decisões técnicas e alternativas consideradas
 
@@ -252,7 +262,7 @@ Os motivos reais pra manter desabilitado são outros:
 | Redirect dinâmico do cache-miss via VTL (`$context.responseOverride.header.Location`) | ✅ Escolhida — resolve a key real sem Lambda no caminho do `404` inicial; exige `binary_media_types` restrito (ver §5) e a base do mapeamento como referência dinâmica, não literal |
 | Lambda de fallback com lock **não-bloqueante** (202 + `Retry-After`) | ✅ Escolhida — evita Lambda ocioso esperando outra invocação terminar (custo) e evita que erros de IAM/permissão (`AccessDenied`) sejam mascarados como "concorrência normal"; qualquer erro que não seja literalmente "lock já existe" vira erro real, não retry silencioso |
 | Consistência entre chunks via `If-Match`/`ETag` (S3 nativo) | ✅ Escolhida — sem custo adicional (S3 já valida `If-Match` se enviado); evita concatenar bytes de versões diferentes do mesmo objeto se ele mudar no meio do download |
-| Compressão (gzip) via `minimum_compression_size` | ❌ Não habilitada — sem ganho real pra formatos já comprimidos servidos (PDF/imagem/octet-stream/APK) e dependeria de toda lib cliente decodificar `Content-Encoding` corretamente pra não corromper o chunk silenciosamente (ver §5) |
+| Compressão (gzip) via `minimum_compression_size = 8192` | ✅ Habilitada, mas **opt-in** (só ativa se o cliente mandar `Accept-Encoding`) — validado empiricamente: ~14% de redução real, sem corromper o chunk quando o cliente decodifica `Content-Encoding` corretamente (ver §5) |
 
 ## 7. Padrão de infraestrutura (Terraform)
 
@@ -295,3 +305,75 @@ assumidas neste documento:
 - **Escopo de autorização por objeto:** o token do banco carrega
   claims que restringem quais paths/buckets o chamador pode acessar, ou
   a autorização é binária (autenticado = acesso a tudo no bucket)?
+
+## 9. Spike — clamp de range reativo no servidor (VTL)
+
+Path isolado `GET /test-range-clamp/{key+}` (mesmo bucket/objeto de
+teste, IAM já liberada) — **não usado pelo `/{key+}` de produção**. Testa
+uma ideia complementar à do §4: em vez do cliente precisar saber de
+antemão o tamanho de chunk "certo", o servidor **sempre** ajusta/injeta
+o `Range` antes de repassar ao S3, garantindo que nenhuma resposta passe
+de `range_clamp_max_chunk_bytes + 1` bytes — mesmo que o cliente peça
+mais, ou não mande `Range` nenhum. O cliente só precisa saber uma coisa:
+olhar `Content-Range` e continuar pedindo enquanto `end < total - 1`
+(igual a qualquer download resumível padrão de mercado).
+
+**Fora do escopo deste spike** (isolado de propósito, não é regressão):
+`If-Match`/`412`, `404`→fallback, `202`/lock — a máquina completa do
+`/{key+}` (ver §4/§6). Decisão de mesclar ou não com produção ainda em
+aberto.
+
+**Bug real encontrado e corrigido**, confirmado via CloudWatch Logs
+(`API-Gateway-Execution-Logs_<rest-api-id>/dev`): a VTL originalmente
+proposta montava o header de saída como
+
+```
+#set($context.requestOverride.header.Range = "bytes=$rangeStart-$rangeEnd")
+```
+
+Velocity aceita hífen como caractere válido de nome de referência —
+`$rangeStart-` é lido como o nome de **uma** referência só
+("rangeStart-", inexistente, renderiza vazio), não como `$rangeStart`
+seguido do literal `-`. O log de execução mostrou o sintoma exato:
+
+```
+Request parameter overrides: Add Range: bytes=8388607
+```
+
+(faltando o `0-` do início). Como esse Range malformado não bate a
+sintaxe HTTP (`bytes=<start>-<end>`), o S3 o ignorou e devolveu o objeto
+inteiro (114.540.033 bytes) como `200`, e o API Gateway rejeitou a
+resposta com a mensagem exata (mais precisa que a genérica do §5):
+
+```
+Execution failed due to configuration error: Integration response of
+reported length 114540033 is larger than allowed maximum of 10485760
+bytes.
+```
+
+Fix: delimitar a referência com chaves — `"bytes=$${rangeStart}-$${rangeEnd}"`
+no `.tftpl` (o `$$` escapa o `${...}` pro Terraform não tentar
+interpolar como variável dele mesmo antes de virar VTL).
+
+Também aplicado, de forma defensiva (não era a causa raiz deste bug
+específico, mas é um risco real e documentado do VTL/Velocity no API
+Gateway): `$input.params('Range')` e o resultado de `.split("-")`
+retornam `String`, e Velocity não converte `String` pra `Number`
+automaticamente em operadores aritméticos (`$rangeStart + $maxChunk`
+pode falhar ou concatenar em vez de somar). Mitigado com o padrão da
+comunidade `#set($Integer = 0)` + `$Integer.parseInt(...)` antes de
+qualquer conta.
+
+**Validado empiricamente** com os 3 casos que motivaram o spike, todos
+contra o objeto real de ~109MB, teto configurado em 8MiB
+(`range_clamp_max_chunk_bytes = 8388607`):
+
+| Caso | `Range` pedido | `Content-Range` devolvido | Bytes | MD5 |
+| :---- | :---- | :---- | :---- | :---- |
+| sem tamanho de bloco | `bytes=0-` | `bytes 0-8388607/114540033` | 8.388.608 | idêntico nos 3 |
+| exatamente no teto | `bytes=0-8388607` | `bytes 0-8388607/114540033` | 8.388.608 | idêntico nos 3 |
+| bem acima do teto | `bytes=0-999999999` | `bytes 0-8388607/114540033` | 8.388.608 | idêntico nos 3 |
+
+Os três casos devolveram exatamente os mesmos bytes (MD5 igual,
+cabeçalho `%PDF-1.5` intacto) — o servidor nunca deixa passar do teto,
+independente do que (ou se) o cliente pede.

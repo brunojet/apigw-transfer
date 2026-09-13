@@ -173,6 +173,104 @@ paths:
               $default: |
                 #set($key = $input.params('key'))
                 #set($context.responseOverride.header.Location = "/${stage_name}/fallback/$key")
+  # ---------------------------------------------------------------
+  # SPIKE ISOLADO -- servidor sempre ajusta/injeta o Range antes de
+  # repassar ao S3, garantindo que nenhum chunk devolvido passe de
+  # range_clamp_max_chunk_bytes+1 bytes, mesmo que o cliente peça mais
+  # (ou nao peca Range nenhum). Fora do escopo desta rodada: sem
+  # If-Match/412, sem 404->fallback -- so valida a mecanica do clamp em
+  # si. Ver PLAN.md Fase 3.6. NAO usado por /{key+} de producao.
+  #
+  # Achado ainda nao confirmado contra a AWS real (documentar aqui
+  # quando validado): $input.params('Range') devolve String (via
+  # String.split()), e Velocity nao converte String pra Number
+  # automaticamente em operadores aritmeticos -- por isso o
+  # $Integer.parseInt(...) abaixo, em vez de somar a String direto.
+  # ---------------------------------------------------------------
+  "/test-range-clamp/{key+}":
+    get:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+        - name: "Range"
+          in: "header"
+          required: false
+          schema:
+            type: "string"
+      responses:
+        "206":
+          description: "chunk parcial -- nunca maior que range_clamp_max_chunk_bytes+1 bytes, independente do que o cliente pediu (ou se nao pediu Range nenhum)"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Content-Range: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+        "416":
+          description: "range nao satisfazivel (ex.: start >= tamanho do objeto)"
+      x-amazon-apigateway-integration:
+        type: "aws"
+        httpMethod: "GET"
+        uri: "arn:aws:apigateway:${aws_region}:s3:path/${bucket_name}/{key}"
+        credentials: "${execution_role_arn}"
+        passthroughBehavior: "when_no_match"
+        requestParameters:
+          integration.request.path.key: "method.request.path.key"
+        requestTemplates:
+          # $default (nao "application/json") -- um GET normalmente nao
+          # manda Content-Type, e com passthroughBehavior=when_no_match a
+          # falta de match faria a requisicao passar sem transformacao
+          # nenhuma, ou seja, o clamp de Range nunca rodaria de verdade.
+          $default: |
+            #set($Integer = 0)
+            #set($maxChunk = ${range_clamp_max_chunk_bytes})
+            #set($rawRange = $input.params('Range'))
+            #if($rawRange && $rawRange != "")
+              #set($rangeBody = $rawRange.replaceAll("bytes=", ""))
+              #set($parts = $rangeBody.split("-"))
+              #set($rangeStart = $Integer.parseInt($parts.get(0).trim()))
+              #if($parts.size() > 1 && $parts.get(1) && $parts.get(1).trim() != "")
+                #set($clientEnd = $Integer.parseInt($parts.get(1).trim()))
+                #set($safeEnd = $rangeStart + $maxChunk)
+                #if($clientEnd > $safeEnd)
+                  #set($rangeEnd = $safeEnd)
+                #else
+                  #set($rangeEnd = $clientEnd)
+                #end
+              #else
+                ## "bytes=N-" sem fim definido -> aplica limite a partir do inicio
+                #set($rangeEnd = $rangeStart + $maxChunk)
+              #end
+            #else
+              ## Sem header Range -> assume inicio 0 com limite seguro.
+              ## Isso torna a resposta 200 (objeto inteiro) inalcancavel
+              ## por design neste path -- e' o comportamento sendo testado.
+              #set($rangeStart = 0)
+              #set($rangeEnd = $maxChunk)
+            #end
+            ## $rangeStart-$rangeEnd (sem chaves) NAO funciona: Velocity
+            ## aceita hifen em nome de referencia, entao "$rangeStart-"
+            ## vira o nome de UMA referencia so ("rangeStart-", inexistente,
+            ## renderiza vazio) em vez de "$rangeStart" seguido do literal
+            ## "-". $${...} (chaves, escapado pro Terraform nao tentar
+            ## interpolar como variavel dele) delimita a referencia sem
+            ## ambiguidade. Achado real, confirmado via CloudWatch Logs
+            ## (Add Range: bytes=8388607, faltando o "0-" do inicio).
+            #set($context.requestOverride.header.Range = "bytes=$${rangeStart}-$${rangeEnd}")
+        responses:
+          "206":
+            statusCode: "206"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Content-Range: "integration.response.header.Content-Range"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+          "416":
+            statusCode: "416"
+          default:
+            statusCode: "500"
   "/fallback/{key+}":
     get:
       parameters:

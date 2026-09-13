@@ -16,6 +16,10 @@ binary_media_types = [
   "application/vnd.android.package-archive",
 ]
 
+# So comprime (gzip) se o cliente mandar Accept-Encoding -- opt-in do
+# cliente, nunca forcado. Ver SPEC.md secao 5/6.
+minimum_compression_size = 8192 # 8KB
+
 tags = {
   Project     = "apigw-transfer"
   Environment = "dev"

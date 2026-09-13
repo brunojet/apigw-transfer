@@ -40,6 +40,18 @@ variable "binary_media_types" {
   default     = ["*/*"]
 }
 
+variable "minimum_compression_size" {
+  description = "Bytes mínimos (default: 8KB) pra API Gateway comprimir a resposta (gzip) quando o cliente manda Accept-Encoding -- opt-in do cliente, nunca forçado. Ver SPEC.md §5/§6."
+  type        = number
+  default     = 8192
+}
+
+variable "range_clamp_max_chunk_bytes" {
+  description = "Offset máximo do range no path de spike /test-range-clamp/{key+} -- chunk real = valor + 1 byte. Default 8388607 = 8MiB - 1 (mesmo tamanho já validado na Fase 3). Não afeta o /{key+} de produção."
+  type        = number
+  default     = 8388607
+}
+
 variable "origin_prefix" {
   description = "Prefixo no bucket usado como origem simulada pela Lambda de fallback (mesmo bucket, ver memoria de projeto)"
   type        = string

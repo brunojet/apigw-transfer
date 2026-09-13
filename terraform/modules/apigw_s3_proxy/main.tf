@@ -53,12 +53,13 @@ resource "aws_iam_role_policy" "apigw_s3" {
 
 locals {
   openapi_spec = templatefile("${path.module}/openapi.yaml.tftpl", {
-    api_name                   = var.api_name
-    stage_name                 = var.stage_name
-    aws_region                 = var.aws_region
-    bucket_name                = var.bucket_name
-    execution_role_arn         = aws_iam_role.apigw_s3.arn
-    fallback_lambda_invoke_arn = var.fallback_lambda_invoke_arn
+    api_name                    = var.api_name
+    stage_name                  = var.stage_name
+    aws_region                  = var.aws_region
+    bucket_name                 = var.bucket_name
+    execution_role_arn          = aws_iam_role.apigw_s3.arn
+    fallback_lambda_invoke_arn  = var.fallback_lambda_invoke_arn
+    range_clamp_max_chunk_bytes = var.range_clamp_max_chunk_bytes
   })
 }
 
@@ -74,6 +75,10 @@ resource "aws_api_gateway_rest_api" "this" {
   body               = local.openapi_spec
   put_rest_api_mode  = "overwrite"
   tags               = var.tags
+
+  # So comprime se o cliente mandar Accept-Encoding: gzip -- opt-in do
+  # proprio cliente, nao forcado pelo servidor (ver SPEC.md secao 5/6).
+  minimum_compression_size = var.minimum_compression_size
 }
 
 resource "aws_api_gateway_deployment" "this" {
