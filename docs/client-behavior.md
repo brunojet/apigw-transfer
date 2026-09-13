@@ -8,9 +8,21 @@ servidor é montado.
 
 ## 1. Visão geral do contrato
 
-- **Descoberta de tamanho:** `HEAD /{key}` sempre primeiro.
-- **Download:** `GET /{key}` com header `Range`, em blocos (nunca sem
-  `Range` — ver SPEC.md seção 5, teto de payload do API Gateway).
+- **Descoberta de tamanho:** `HEAD /{key}` é **recomendado, mas não
+  mais obrigatório** (mudou depois do merge do clamp reativo em
+  produção — ver SPEC.md §9). O servidor sempre limita/injeta o `Range`
+  antes de repassar ao S3, então até o **primeiro `GET`** (com ou sem
+  `Range`) já vem como `206` com `Content-Range: bytes X-Y/total` — o
+  tamanho total sai daí de graça. Um cliente pode pular o `HEAD` e só
+  fazer `GET`s em loop, olhando `Content-Range` a cada resposta. `HEAD`
+  continua útil se você quer confirmar existência/`ETag` antes de
+  começar a escrever no disco, mas não é mais uma etapa obrigatória.
+- **Download:** `GET /{key}` em blocos — o cliente pede
+  `Range: bytes={offset}-` (aberto, sem fim) e o **servidor** decide
+  quanto devolve por resposta (nunca mais que o teto configurado — ver
+  SPEC.md §5/§9). O cliente não escolhe/calcula tamanho de bloco; avança
+  pelo tamanho **real** recebido em cada resposta (`Content-Range` ou
+  `len(corpo)`), não por um valor pré-calculado.
 - **Cache-miss:** se `/{key}` responder `404`, o servidor responde `302`
   com um `Location` **já totalmente resolvido** (ex.:
   `/dev/fallback/apigw-transfer-fallback-test.bin`, montado dinamicamente
@@ -24,22 +36,27 @@ servidor é montado.
 
 ## 2. Caminho feliz — arquivo já existe
 
+`HEAD` é opcional (ver §1) — o diagrama mostra a variante que ainda o
+usa (é o que `scripts/download_range.py` faz, pra pegar o `ETag` cedo),
+mas um cliente pode começar direto pelo `GET` de dentro do loop.
+
 ```mermaid
 sequenceDiagram
     participant C as Cliente
     participant AGW as API Gateway
     participant S3 as S3 (bucket)
 
-    C->>AGW: HEAD /{key}
+    C->>AGW: HEAD /{key}  (opcional -- ver §1)
     AGW->>S3: HeadObject(key)
-    S3-->>AGW: 200, Content-Length=N
-    AGW-->>C: 200, Content-Length=N
+    S3-->>AGW: 200, Content-Length=N, ETag
+    AGW-->>C: 200, Content-Length=N, ETag
 
     loop enquanto offset < N
-        C->>AGW: GET /{key}  Range: bytes=X-Y
-        AGW->>S3: GetObject(key, Range)
-        S3-->>AGW: 206, Content-Range
-        AGW-->>C: 206, chunk binário
+        C->>AGW: GET /{key}  Range: bytes=offset-  (aberto)
+        AGW->>S3: GetObject(key, Range ajustado pelo servidor)
+        S3-->>AGW: 206, Content-Range: bytes offset-Y/N
+        AGW-->>C: 206, chunk binário (tamanho decidido pelo servidor)
+        Note over C: offset += bytes recebidos (não um valor pré-calculado)
     end
     Note over C: reconstrói o arquivo concatenando os chunks
 ```
@@ -128,13 +145,14 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A["HEAD /key"] --> B{status}
-    B -->|200| C["Content-Length conhecido"]
-    C --> D["GET /key  Range: bytes=offset-offset+chunk"]
+    A["HEAD /key (opcional)"] --> B{status}
+    B -->|200| C["Content-Length/ETag conhecidos"]
+    C --> D["GET /key  Range: bytes=offset-  (aberto)"]
     D --> E{status}
-    E -->|206| F{offset < total?}
-    F -->|sim| D
-    F -->|não| G["download completo"]
+    E -->|206| F["offset += bytes recebidos"]
+    F --> G{offset < total?}
+    G -->|sim| D
+    G -->|não| Z["download completo"]
     E -->|500 / timeout| H["erro transitório -- retry com backoff"]
     H --> D
 
@@ -153,9 +171,9 @@ flowchart TD
 
 | Situação | O cliente DEVE |
 |---|---|
-| Antes de baixar | Sempre fazer `HEAD /{key}` primeiro pra saber o tamanho total. |
-| Download | Sempre usar `Range` — nunca `GET` sem `Range` num objeto que pode passar do teto de payload do API Gateway (ver SPEC.md §5). |
-| Tamanho de chunk | Usar no máximo **8 MiB** por chunk — validado ponta a ponta (Fase 3); tamanhos maiores tiveram comportamento instável nos nossos testes. |
+| Antes de baixar | `HEAD /{key}` é **recomendado**, não mais obrigatório — o servidor sempre clampa a resposta, então até o `GET` sem `Range` revela o tamanho total via `Content-Range` (ver §1). Fazer `HEAD` primeiro continua sendo útil pra confirmar existência/`ETag` antes de abrir o arquivo de saída. |
+| Download | Pedir `Range: bytes={offset}-` (aberto, sem fim) — o servidor decide quanto devolve, sempre dentro do teto configurado (SPEC.md §5/§9). Não precisa (e não deve) calcular um fim de range. |
+| Tamanho de chunk | **Não é mais escolha do cliente.** O servidor sempre limita a resposta a um teto seguro, independente do que o cliente pede ou não pede. O cliente só precisa avançar pelo tamanho **real** recebido (`len(corpo)`/`Content-Range`) a cada resposta, nunca por um valor fixo pré-calculado. |
 | `404`/`302` no path direto | Seguir o `Location` — já vem resolvido (path real, sem template) e pode ser seguido automaticamente como qualquer redirect HTTP. |
 | `202` no `/fallback/{key}` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita concorrência desnecessária de Lambda. |
 | `302` no `/fallback/{key}` | Seguir o `Location` (path relativo, já inclui o stage) — geralmente volta pro path direto, que agora deve responder `200`/`206`. |
@@ -219,8 +237,19 @@ checar `202`/`412` manualmente a cada requisição:
 ## 9. Limites conhecidos (não normativo, mas relevante pro cliente)
 
 - O teto de payload do API Gateway é **rígido**: ultrapassar causa falha
-  abrupta (não é "entrega parcial e avisa"). Por isso o chunk de 8 MiB é
-  uma recomendação forte, não só uma otimização.
+  abrupta (não é "entrega parcial e avisa"). Isso não é mais problema do
+  cliente ter que evitar manualmente — o servidor sempre limita a
+  resposta a um teto seguro, mesmo que o cliente peça mais (ver §1).
+- `/fallback/{key}` manda `Cache-Control: max-age` em duas respostas
+  específicas: o `202` (mesmo valor do `Retry-After` — protege contra
+  vários clientes reconsultando a mesma key popular enquanto ela é
+  populada) e o `404` definitivo (key não existe nem na origem —
+  configurável via stage variable, default 60s). As demais respostas
+  (erro transitório, `302` de sucesso) **não** têm esse header de
+  propósito — não devem ser cacheadas. Um cliente HTTP com cache próprio
+  configurado (ex.: OkHttp com `Cache` habilitado — não é o default, veja
+  §8) aproveita isso automaticamente; sem cache configurado, o header
+  simplesmente não faz nada, não é um requisito pro contrato funcionar.
 - `binary_media_types` precisa estar configurado no servidor com os
   content-types reais que ele serve (não vazio, e não é obrigatório ser
   `"*/*"`) pra o corpo binário vir intacto — sem isso, o conteúdo vem

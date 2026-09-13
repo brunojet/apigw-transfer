@@ -24,6 +24,9 @@ tfplan
 *.swo
 *~
 
+# Backup/autosave do editor Draw.io Integration
+.$*.drawio.bkp
+
 # OS
 .DS_Store
 Thumbs.db
