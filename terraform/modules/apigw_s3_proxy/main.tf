@@ -52,14 +52,16 @@ resource "aws_iam_role_policy" "apigw_s3" {
 }
 
 locals {
+  # bucket_name, stage_name e max_chunk_bytes NAO entram mais
+  # aqui -- viraram stage variables (aws_api_gateway_stage.variables
+  # abaixo) e $context.stage, lidos em runtime pela VTL/URI do
+  # openapi.yaml.tftpl. Mudar esses valores nao dispara mais redeploy
+  # (sha1(local.openapi_spec) nao muda).
   openapi_spec = templatefile("${path.module}/openapi.yaml.tftpl", {
-    api_name                    = var.api_name
-    stage_name                  = var.stage_name
-    aws_region                  = var.aws_region
-    bucket_name                 = var.bucket_name
-    execution_role_arn          = aws_iam_role.apigw_s3.arn
-    fallback_lambda_invoke_arn  = var.fallback_lambda_invoke_arn
-    range_clamp_max_chunk_bytes = var.range_clamp_max_chunk_bytes
+    api_name                   = var.api_name
+    aws_region                 = var.aws_region
+    execution_role_arn         = aws_iam_role.apigw_s3.arn
+    fallback_lambda_invoke_arn = var.fallback_lambda_invoke_arn
   })
 }
 
@@ -98,6 +100,21 @@ resource "aws_api_gateway_stage" "this" {
   deployment_id = aws_api_gateway_deployment.this.id
   stage_name    = var.stage_name
   tags          = var.tags
+
+  # Lidas em runtime -- bucketName/maxChunkBytes pela VTL/URI de
+  # integracao (${stageVariables.x} / $stageVariables.x no
+  # openapi.yaml.tftpl), notFoundMaxAgeSeconds pela Lambda de fallback
+  # (event.StageVariables, integracao aws_proxy) -- mudar qualquer um
+  # desses valores NAO dispara redeploy do aws_api_gateway_deployment
+  # acima (o corpo da API fica identico), diferente de mudar algo
+  # embutido via templatefile(). bucketName tambem serve pra apontar essa
+  # stage pra outro bucket via console/CLI sem reaplicar Terraform (uteis
+  # pra teste manual), desde que a IAM role (acima) ja libere o bucket alvo.
+  variables = {
+    bucketName            = var.bucket_name
+    maxChunkBytes         = tostring(var.max_chunk_bytes)
+    notFoundMaxAgeSeconds = tostring(var.notfound_max_age_seconds)
+  }
 }
 
 # Permite que este REST API invoque a Lambda de fallback (GET/HEAD

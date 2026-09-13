@@ -37,10 +37,12 @@ import (
 )
 
 const (
-	defaultS3Bucket       = "brunojet-media-proxy-dev"
-	defaultOriginPrefix   = "origin/"
-	defaultLockTTL        = 45 // segundos -- deve ser < timeout da Lambda
-	defaultRetryAfterSecs = 5  // segundos sugeridos ao cliente via Retry-After
+	defaultS3Bucket            = "brunojet-media-proxy-dev"
+	defaultOriginPrefix        = "origin/"
+	defaultLockTTL             = 45 // segundos -- deve ser < timeout da Lambda
+	defaultRetryAfterSecs      = 5  // segundos sugeridos ao cliente via Retry-After
+	defaultNotFoundMaxAgeSecs  = 60 // usado só se a stage variable estiver ausente/inválida
+	notFoundMaxAgeStageVarName = "notFoundMaxAgeSeconds"
 )
 
 var (
@@ -123,7 +125,7 @@ func Handle(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIG
 	originKey := originPrefix + key
 	obj := &storagecontracts.BucketObject{}
 	if err := bucket.GetObject(ctx, originKey, obj); err != nil {
-		return errorResponse(http.StatusNotFound, fmt.Sprintf("object not found in origin: %s", originKey)), nil
+		return notFoundInOriginResponse(req, originKey), nil
 	}
 	defer func() {
 		if closeErr := obj.Close(); closeErr != nil {
@@ -178,16 +180,68 @@ func redirectToDirectPath(stage, key string) events.APIGatewayProxyResponse {
 // só ainda não terminou -- mais preciso que 503 (que soa como falha) ou
 // 429 (que soa como rate limit, não é o caso aqui). Evita a Lambda ficar
 // bloqueada esperando o lock liberar.
+//
+// Cache-Control usa o MESMO valor de Retry-After (não uma constante
+// separada) de propósito: os dois headers prometem a mesma coisa ("essa
+// resposta vale por N segundos"), então usar a mesma variável garante que
+// nunca ficam dessincronizados se alguém mudar RETRY_AFTER_SECONDS. Isso
+// protege contra estouro de manada -- vários clientes perguntando pela
+// mesma key popular enquanto ela está sendo populada -- sem custo de
+// infra: um cliente bem-comportado já ia esperar esses N segundos de
+// qualquer jeito antes de perguntar de novo; cachear só evita que outros
+// clientes (ou um mal-comportado) reconsultem a Lambda antes da hora. O
+// único custo é um cliente raro receber esse 202 cacheado por até N
+// segundos a mais mesmo se o lock já tiver liberado antes disso -- atraso
+// máximo de N segundos, não um erro.
 func retryLaterResponse(detail string) events.APIGatewayProxyResponse {
 	log.Printf("RETRY: %s", detail)
 	return events.APIGatewayProxyResponse{
 		StatusCode: http.StatusAccepted,
 		Headers: map[string]string{
-			"Content-Type": "application/json",
-			"Retry-After":  strconv.Itoa(retryAfterSecs),
+			"Content-Type":  "application/json",
+			"Retry-After":   strconv.Itoa(retryAfterSecs),
+			"Cache-Control": fmt.Sprintf("max-age=%d", retryAfterSecs),
 		},
 		Body: fmt.Sprintf(`{"status":202,"detail":%q,"retry_after_seconds":%d}`, detail, retryAfterSecs),
 	}
+}
+
+// notFoundInOriginResponse responde 404 quando a key não existe nem na
+// origem simulada. Diferente dos outros erros deste handler (falha de
+// lock/permissão/rede, upload -- todos transitórios, podem funcionar na
+// próxima tentativa), este caso NÃO muda sozinho: só um humano populando
+// origin/{key} resolve. Por isso é a ÚNICA resposta com Cache-Control:
+// max-age -- protege contra clientes (de qualquer app, agregado) batendo
+// repetidamente numa key que sabemos que vai continuar falhando, sem
+// custo de infra (é só um header; cache de fato, se algum dia justificar
+// o custo, é decisão separada -- ver SPEC.md). O valor vem de uma stage
+// variable (notFoundMaxAgeSeconds), não de env var/redeploy, pelo mesmo
+// motivo do maxChunkBytes do apigw_s3_proxy: ajustável sem tocar no
+// código. As respostas transitórias (500) e o 202 (lock ocupado) NÃO
+// ganham esse header de propósito -- cachear uma falha transitória
+// estenderia a indisponibilidade além do problema real.
+func notFoundInOriginResponse(req events.APIGatewayProxyRequest, originKey string) events.APIGatewayProxyResponse {
+	detail := fmt.Sprintf("object not found in origin: %s", originKey)
+	log.Printf("ERROR: %d - %s", http.StatusNotFound, detail)
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusNotFound,
+		Headers: map[string]string{
+			"Content-Type":  "application/json",
+			"Cache-Control": fmt.Sprintf("max-age=%d", notFoundMaxAgeSeconds(req)),
+		},
+		Body: fmt.Sprintf(`{"status":%d,"detail":%q}`, http.StatusNotFound, detail),
+	}
+}
+
+// notFoundMaxAgeSeconds lê a stage variable notFoundMaxAgeSeconds; um
+// valor ausente ou inválido (não numérico, negativo) cai no default.
+func notFoundMaxAgeSeconds(req events.APIGatewayProxyRequest) int {
+	if v, ok := req.StageVariables[notFoundMaxAgeStageVarName]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultNotFoundMaxAgeSecs
 }
 
 func errorResponse(statusCode int, detail string) events.APIGatewayProxyResponse {

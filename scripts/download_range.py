@@ -12,6 +12,12 @@ Retry-After e tenta de novo sozinho. Isso é desacoplado do retry
 específico de chunk em get_range() (que trata erro transitório tipo 500,
 não 202).
 
+Tamanho de bloco: o cliente não escolhe mais -- o servidor sempre
+trunca a resposta com segurança (ver openapi.yaml.tftpl e SPEC.md §9),
+então cada GET pede só `Range: bytes={start}-` (sem fim definido) e o
+script avança pelo tamanho REAL recebido (Content-Length/len(body)),
+não por um valor pré-calculado. Não existe mais flag de chunk-size.
+
 Consistência entre chunks: manda `If-Match: <etag>` (do HEAD inicial) em
 todo GET Range -- se o arquivo mudar no meio do download, o S3 responde
 412 e o script para na hora, em vez de concatenar bytes de duas versões
@@ -23,10 +29,19 @@ continua de onde parou (ou pula direto se já estiver completo) em vez de
 baixar tudo de novo. Se o ETag mudou, descarta o parcial e recomeça do
 zero com a versão atual.
 
-Só stdlib (urllib), sem dependencias.
+Usa `requests` (não é mais stdlib-only) especificamente pela compressão
+transparente: `requests` manda `Accept-Encoding` sozinho e descompacta
+`Content-Encoding` sozinho em `resp.content` -- as duas pontas sempre
+juntas, sem meio-termo. `urllib.request` puro faz só metade disso (nem
+manda o header nem descompacta), o que é seguro por omissão mas exige
+código manual pra realmente usar compressão -- ver SPEC.md §5 do
+apigw-transfer pra essa distinção validada empiricamente contra o
+próprio endpoint (`requests` decodifica certo; header manual sem
+decodificação recebe bytes gzip crus). `pip install -r
+scripts/requirements.txt`.
 
 Uso:
-    python scripts/download_range.py [url] [-o saida.bin] [-c BYTES] [-r N] [-v]
+    python scripts/download_range.py [url] [-o saida.bin] [-r N] [-v]
 
 Sem argumento de URL, usa TEST_URL (constante abaixo, do stage dev atual).
 Se recriar a API (terraform apply muda o rest_api_id), atualize essa constante
@@ -37,9 +52,8 @@ import argparse
 import os
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+
+import requests
 
 TEST_URL = "https://7d3q1z0cw9.execute-api.us-east-1.amazonaws.com/dev/servicenow-zurich-platform-security-ptbr.pdf"
 
@@ -50,18 +64,20 @@ MAX_FALLBACK_WAIT_SECONDS = 120
 
 def _do_request(url: str, method: str, verbose: bool, headers: dict = None):
     """Uma única tentativa HTTP, sem tratar 202 nem nada -- usada por
-    request() abaixo. Segue redirect automaticamente (padrão do urllib)."""
-    req = urllib.request.Request(url, method=method, headers=headers or {})
+    request() abaixo. Segue redirect automaticamente (allow_redirects=True
+    explícito -- o default do requests.head() de conveniência é False,
+    mas aqui usamos requests.request() genérico pra HEAD/GET igual, então
+    fixamos o comportamento em vez de depender do default implícito).
+    resp.content já vem descompactado por requests caso o servidor mande
+    Content-Encoding (gzip/deflate) -- não precisa de gzip.decompress()
+    manual; requests também não levanta exceção pra status 4xx/5xx (ao
+    contrário do urllib.error.HTTPError), então não precisa de try/except
+    aqui pra separar sucesso de erro HTTP."""
     t0 = time.time()
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read()
-            resp_headers = dict(resp.headers)
-            status = resp.status
-    except urllib.error.HTTPError as e:
-        body = e.read()
-        resp_headers = dict(e.headers or {})
-        status = e.code
+    resp = requests.request(method, url, headers=headers or {}, allow_redirects=True)
+    body = resp.content
+    resp_headers = dict(resp.headers)
+    status = resp.status_code
     if verbose:
         dt = time.time() - t0
         print(f"  {method} {url} -> {status} ({dt:.2f}s) headers={resp_headers}")
@@ -107,17 +123,18 @@ def head(url: str, verbose: bool):
     raise RuntimeError(f"HEAD retornou status inesperado: {status} body={body[:300]!r}")
 
 
-def get_range(url: str, start: int, end: int, etag: str, retries: int, retry_delay: float, verbose: bool):
-    """GET com Range bytes=start-end, mandando If-Match: etag (garante que
-    esse chunk vem da mesma versão do objeto que o HEAD viu). Retorna
-    (status, body, headers, tentativas) em sucesso ou erro transitório
-    esgotado. Um 412 (ETag não bate -- o arquivo mudou no meio do
-    download) NÃO é um erro comum retentável: levanta RuntimeError aqui
-    mesmo, em vez de devolver como status "normal" -- assim não tem como
-    quem chama esquecer de tratar e acabar concatenando bytes de duas
-    versões diferentes do objeto como se fosse só "mais um chunk que
-    falhou"."""
-    req_headers = {"Range": f"bytes={start}-{end}"}
+def get_range(url: str, start: int, etag: str, retries: int, retry_delay: float, verbose: bool):
+    """GET com Range bytes=start- (aberto -- sem fim definido: quem decide
+    quanto vem de volta é o servidor, que trunca com segurança sozinho),
+    mandando If-Match: etag (garante que esse chunk vem da mesma versão do
+    objeto que o HEAD viu). Retorna (status, body, headers, tentativas) em
+    sucesso ou erro transitório esgotado. Um 412 (ETag não bate -- o
+    arquivo mudou no meio do download) NÃO é um erro comum retentável:
+    levanta RuntimeError aqui mesmo, em vez de devolver como status
+    "normal" -- assim não tem como quem chama esquecer de tratar e acabar
+    concatenando bytes de duas versões diferentes do objeto como se fosse
+    só "mais um chunk que falhou"."""
+    req_headers = {"Range": f"bytes={start}-"}
     if etag:
         req_headers["If-Match"] = etag
     attempt = 0
@@ -131,7 +148,7 @@ def get_range(url: str, start: int, end: int, etag: str, retries: int, retry_del
             )
         if status == 206 or attempt > retries:
             return status, body, headers, attempt
-        print(f"  bytes={start}-{end} -> HTTP {status} (tentativa {attempt}/{retries + 1}), "
+        print(f"  bytes={start}- -> HTTP {status} (tentativa {attempt}/{retries + 1}), "
               f"retry em {retry_delay}s...")
         time.sleep(retry_delay)
 
@@ -153,7 +170,7 @@ def _save_etag(out_path: str, etag: str):
         f.write(etag)
 
 
-def download(url: str, out_path: str, chunk_size: int, retries: int, retry_delay: float, verbose: bool):
+def download(url: str, out_path: str, retries: int, retry_delay: float, verbose: bool):
     total, etag = head(url, verbose)
     if total == 0:
         print("Content-Length veio 0/ausente — abortando.")
@@ -176,30 +193,34 @@ def download(url: str, out_path: str, chunk_size: int, retries: int, retry_delay
 
     _save_etag(out_path, etag)
 
-    n_chunks = ((total - start) + chunk_size - 1) // chunk_size
-    print(f"Baixando {total - start} bytes restantes em {n_chunks} blocos de {chunk_size} bytes...")
+    print(f"Baixando {total - start} bytes restantes -- tamanho de bloco decidido pelo servidor "
+          f"a cada resposta, não pré-calculado aqui.")
 
-    failures = []
     with open(out_path, mode) as f:
         idx = 0
         while start < total:
-            end = min(start + chunk_size, total) - 1
             idx += 1
-            status, body, headers, attempts = get_range(url, start, end, etag, retries, retry_delay, verbose)
+            status, body, headers, attempts = get_range(url, start, etag, retries, retry_delay, verbose)
             content_range = headers.get("Content-Range", "-")
-            print(f"[{idx}/{n_chunks}] bytes={start}-{end} -> HTTP {status} "
+            print(f"[{idx}] bytes={start}- -> HTTP {status} "
                   f"len={len(body)} Content-Range={content_range} tentativas={attempts}")
             if status != 206:
-                print(f"  ERRO definitivo neste bloco: {body[:300]!r}")
-                failures.append((start, end, status))
-                start = end + 1
-                continue
+                # Sem um "end" pré-calculado, não há como pular um bloco de
+                # tamanho desconhecido e continuar de forma segura -- vira
+                # erro fatal em vez de deixar um buraco de tamanho incerto
+                # no arquivo (comportamento antigo, quando o cliente sabia
+                # exatamente quantos bytes o bloco falho ia ocupar).
+                raise RuntimeError(f"bloco a partir de bytes={start} falhou definitivamente: "
+                                    f"HTTP {status} {body[:300]!r}")
+            if len(body) == 0:
+                raise RuntimeError(f"resposta 206 com corpo vazio a partir de bytes={start} -- "
+                                    f"abortando pra evitar loop infinito")
             f.write(body)
-            start = end + 1
+            start += len(body)
 
     actual_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
     print(f"\nConcluído. Esperado={total} bytes, arquivo local={actual_size} bytes"
-          + (" (OK, sem falhas)" if not failures else f" -- {len(failures)} bloco(s) falharam: {failures}"))
+          + (" (OK)" if actual_size == total else " -- TAMANHO NAO CONFERE"))
 
 
 def main():
@@ -207,8 +228,6 @@ def main():
     p.add_argument("url", nargs="?", default=TEST_URL,
                    help="URL do objeto (default: TEST_URL definida no topo do arquivo)")
     p.add_argument("-o", "--output", default="download.bin", help="arquivo de saída (default: download.bin)")
-    p.add_argument("-c", "--chunk-size", type=int, default=8 * 1024 * 1024,
-                   help="tamanho do bloco em bytes (default: 8MiB, validado na Fase 3)")
     p.add_argument("-r", "--retries", type=int, default=2,
                    help="tentativas extras por bloco em caso de erro (default: 2)")
     p.add_argument("--retry-delay", type=float, default=1.0, help="segundos entre tentativas (default: 1.0)")
@@ -216,7 +235,7 @@ def main():
     args = p.parse_args()
 
     try:
-        download(args.url, args.output, args.chunk_size, args.retries, args.retry_delay, args.verbose)
+        download(args.url, args.output, args.retries, args.retry_delay, args.verbose)
     except RuntimeError as e:
         print(f"ERRO: {e}")
         sys.exit(1)

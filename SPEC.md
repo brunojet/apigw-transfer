@@ -377,3 +377,22 @@ contra o objeto real de ~109MB, teto configurado em 8MiB
 Os três casos devolveram exatamente os mesmos bytes (MD5 igual,
 cabeçalho `%PDF-1.5` intacto) — o servidor nunca deixa passar do teto,
 independente do que (ou se) o cliente pede.
+
+**Implicação de design: `HEAD` deixa de ser mandatório neste path.** Como
+o servidor sempre injeta um `Range` (mesmo sem o cliente mandar nenhum),
+até o primeiro `GET` sem `Range` já vem como `206` com
+`Content-Range: bytes X-Y/total` — o `total` sai daí de graça, sem
+precisar de uma chamada `HEAD` dedicada antes. Um cliente correto pode
+simplesmente disparar `GET`s em loop (com ou sem `Range`) e descobrir o
+tamanho total na primeira resposta. `ETag` também vem em qualquer
+resposta de `GET`, não só em `HEAD`, então mesmo se este spike ganhar
+consistência `If-Match` no futuro (hoje fora de escopo), o `ETag` ainda
+poderia ser capturado do primeiro `GET`.
+
+**Isso não vale para o `/{key+}` de produção** — lá, sem `Range` o S3
+devolve o objeto inteiro como `200` (nada o limita), então `HEAD`
+continua sendo a forma segura de descobrir o tamanho sem arriscar puxar
+o objeto inteiro de uma vez e estourar o teto de 10MB (§5). A diferença
+está inteiramente no comportamento de "sempre clampar" deste path — não
+é uma propriedade geral de range downloads, é específica de como este
+spike foi desenhado.

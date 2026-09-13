@@ -46,13 +46,33 @@ variable "minimum_compression_size" {
   default     = null
 }
 
-variable "range_clamp_max_chunk_bytes" {
+variable "notfound_max_age_seconds" {
+  description = <<-EOT
+    Cache-Control: max-age (segundos) na resposta 404 da Lambda de
+    fallback (cmd/fallback) quando a key não existe nem na origem
+    simulada -- caso irrecuperável, não transitório (só um humano
+    populando origin/ resolve). Protege contra clientes batendo
+    repetidamente numa key que sabemos que vai continuar falhando, sem
+    custo de infra (client-side caching -- ver SPEC.md). Lido pela
+    Lambda via event.StageVariables["notFoundMaxAgeSeconds"], não env
+    var, pra ser ajustável sem redeploy do binário. Default 60s.
+  EOT
+  type        = number
+  default     = 60
+}
+
+variable "max_chunk_bytes" {
   description = <<-EOT
     Offset maximo somado ao inicio do range (implicito ou pedido pelo
-    cliente) no path de spike /test-range-clamp/{key+} -- o tamanho real
-    do chunk devolvido e' este valor + 1 byte. So afeta esse path isolado,
-    nao o /{key+} de producao. Default 8388607 = 8MiB - 1 (chunk de 8MiB,
-    ja validado end-to-end na Fase 3 do PLAN.md).
+    cliente) em GET /{key+} -- o tamanho real do chunk devolvido e' este
+    valor + 1 byte. O servidor sempre injeta/ajusta o Range antes de
+    repassar ao S3 (ver openapi.yaml.tftpl), entao nenhuma resposta passa
+    desse teto, mesmo que o cliente peca mais ou nao mande Range nenhum.
+    Lido em runtime via stage variable (maxChunkBytes) -- mudar este
+    valor nao dispara redeploy do aws_api_gateway_deployment. Default
+    8388607 = 8MiB - 1 (chunk de 8MiB, ja validado end-to-end na Fase 3
+    do PLAN.md e novamente contra o path de producao apos o merge do
+    spike -- ver SPEC.md secao 9).
   EOT
   type        = number
   default     = 8388607

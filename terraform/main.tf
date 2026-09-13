@@ -47,7 +47,8 @@ module "apigw_s3_proxy" {
   fallback_test_object_key      = var.fallback_test_object_key
   binary_media_types            = var.binary_media_types
   minimum_compression_size      = var.minimum_compression_size
-  range_clamp_max_chunk_bytes   = var.range_clamp_max_chunk_bytes
+  max_chunk_bytes               = var.max_chunk_bytes
+  notfound_max_age_seconds      = var.notfound_max_age_seconds
   fallback_lambda_invoke_arn    = module.fallback_lambda.invoke_arn
   fallback_lambda_function_name = module.fallback_lambda.function_name
   tags                          = var.tags

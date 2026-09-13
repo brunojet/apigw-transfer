@@ -46,8 +46,14 @@ variable "minimum_compression_size" {
   default     = 8192
 }
 
-variable "range_clamp_max_chunk_bytes" {
-  description = "Offset máximo do range no path de spike /test-range-clamp/{key+} -- chunk real = valor + 1 byte. Default 8388607 = 8MiB - 1 (mesmo tamanho já validado na Fase 3). Não afeta o /{key+} de produção."
+variable "notfound_max_age_seconds" {
+  description = "Cache-Control: max-age (segundos) na resposta 404 da Lambda de fallback quando a key não existe nem na origem simulada -- caso irrecuperável, protege contra clientes repetindo a mesma key que vai continuar falhando. Default 60s."
+  type        = number
+  default     = 60
+}
+
+variable "max_chunk_bytes" {
+  description = "Offset máximo do range em GET /{key+} -- chunk real = valor + 1 byte. O servidor sempre injeta/ajusta o Range (nunca deixa passar deste teto). Lido em runtime via stage variable, sem redeploy. Default 8388607 = 8MiB - 1 (já validado end-to-end)."
   type        = number
   default     = 8388607
 }
