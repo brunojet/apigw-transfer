@@ -38,7 +38,7 @@ paths:
             type: "string"
       responses:
         "200":
-          description: "inalcancavel por design -- o servidor sempre injeta um Range (ver requestTemplates abaixo), entao o S3 sempre responde 206. Mantido documentado porque a integration response 'default' ainda mapeia pra 200 (catch-all pra status nao listados aqui)."
+          description: "defensivo -- o servidor sempre injeta um Range (ver requestTemplates abaixo), entao o S3 normalmente responde 206. Mapeado explicitamente (selectionPattern 200) pra nao depender do 'default', que e' so erro."
           headers:
             Content-Type: { schema: { type: "string" } }
             Content-Length: { schema: { type: "string" } }
@@ -57,8 +57,20 @@ paths:
           headers:
             Location: { schema: { type: "string" } }
             Cache-Control: { schema: { type: "string" } }
+        "403":
+          description: "acesso negado pelo S3 (key fora da permissao da role) -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
         "412":
           description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
+        "416":
+          description: "Range alem do fim do objeto -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+        "502":
+          description: "qualquer outro status do S3 (catch-all) -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "GET"
@@ -82,28 +94,29 @@ paths:
             #set($Integer = 0)
             #set($maxChunk = $Integer.parseInt($stageVariables.maxChunkBytes))
             #set($rawRange = $input.params('Range'))
-            #if($rawRange && $rawRange != "")
-              #set($rangeBody = $rawRange.replaceAll("bytes=", ""))
-              #set($parts = $rangeBody.split("-"))
-              #set($rangeStart = $Integer.parseInt($parts.get(0).trim()))
-              #if($parts.size() > 1 && $parts.get(1) && $parts.get(1).trim() != "")
-                #set($clientEnd = $Integer.parseInt($parts.get(1).trim()))
-                #set($safeEnd = $rangeStart + $maxChunk)
-                #if($clientEnd > $safeEnd)
-                  #set($rangeEnd = $safeEnd)
-                #else
-                  #set($rangeEnd = $clientEnd)
-                #end
-              #else
-                ## "bytes=N-" sem fim definido -> aplica limite a partir do inicio
-                #set($rangeEnd = $rangeStart + $maxChunk)
+            ## Formatos aceitos: "bytes=N-" e "bytes=N-M", validados por regex
+            ## antes de qualquer parseInt. Ausente ou qualquer outro formato
+            ## (sufixo "-N", multi-range, "/total", lixo) e' ignorado, como
+            ## manda a RFC 9110, e tratado como "bytes=0-". Repassar um Range
+            ## invalido nao adianta: o S3 o ignora e devolve o objeto inteiro,
+            ## contornando o clamp. \d{1,9} mantem inicio + maxChunk dentro de
+            ## int (enderecavel ate ~950MB).
+            #if(!$rawRange || !$rawRange.matches("bytes=\d{1,9}-\d{0,9}"))
+              #set($rawRange = "bytes=0-")
+            #end
+            ## split com limite -1 preserva o fim vazio de "bytes=N-"
+            #set($parts = $rawRange.substring(6).split("-", -1))
+            #set($rangeStart = $Integer.parseInt($parts.get(0)))
+            #set($rangeEnd = $rangeStart + $maxChunk)
+            #if($parts.get(1) != "")
+              #set($clientEnd = $Integer.parseInt($parts.get(1)))
+              #if($clientEnd < $rangeStart)
+                ## "bytes=100-50" e' invalido (fim < inicio) -> mesmo tratamento
+                #set($rangeStart = 0)
+                #set($rangeEnd = $maxChunk)
+              #elseif($clientEnd < $rangeEnd)
+                #set($rangeEnd = $clientEnd)
               #end
-            #else
-              ## Sem header Range -> assume inicio 0 com limite seguro.
-              ## Todo GET agora sempre vem clampado -- 200 (objeto
-              ## inteiro) vira inalcancavel por design (ver responses acima).
-              #set($rangeStart = 0)
-              #set($rangeEnd = $maxChunk)
             #end
             ## $rangeStart-$rangeEnd (sem chaves) NAO funciona: Velocity
             ## aceita hifen em nome de referencia, entao "$rangeStart-"
@@ -113,7 +126,7 @@ paths:
             ## original (SPEC.md §9).
             #set($context.requestOverride.header.Range = "bytes=$${rangeStart}-$${rangeEnd}")
         responses:
-          default:
+          "200":
             statusCode: "200"
             responseParameters:
               method.response.header.Content-Type: "integration.response.header.Content-Type"
@@ -128,8 +141,12 @@ paths:
               method.response.header.Content-Range: "integration.response.header.Content-Range"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
-          "412":
-            statusCode: "412"
+          "403":
+            statusCode: "403"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":403,"detail":"access denied"}'
           "404":
             statusCode: "302"
             responseParameters:
@@ -155,6 +172,24 @@ paths:
               $default: |
                 #set($key = $input.params('key'))
                 #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
+          "412":
+            statusCode: "412"
+          "416":
+            statusCode: "416"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":416,"detail":"requested range not satisfiable"}'
+          # "default" (sem selectionPattern) pega QUALQUER status nao listado
+          # acima -- por isso e' erro (502), nunca 200. Antes, 403/416/5xx
+          # do S3 saiam como 200 com o XML de erro no corpo (que ainda expoe
+          # conta e ARN da role). Erros usam corpo JSON generico.
+          default:
+            statusCode: "502"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":502,"detail":"upstream error"}'
     head:
       parameters:
         - name: "key"
@@ -175,6 +210,10 @@ paths:
           headers:
             Location: { schema: { type: "string" } }
             Cache-Control: { schema: { type: "string" } }
+        "403":
+          description: "acesso negado pelo S3 (key fora da permissao da role)"
+        "502":
+          description: "qualquer outro status do S3 (catch-all)"
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "HEAD"
@@ -184,13 +223,15 @@ paths:
         requestParameters:
           integration.request.path.key: "method.request.path.key"
         responses:
-          default:
+          "200":
             statusCode: "200"
             responseParameters:
               method.response.header.Content-Type: "integration.response.header.Content-Type"
               method.response.header.Content-Length: "integration.response.header.Content-Length"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
+          "403":
+            statusCode: "403"
           "404":
             statusCode: "302"
             responseParameters:
@@ -216,6 +257,10 @@ paths:
               $default: |
                 #set($key = $input.params('key'))
                 #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
+          # Mesmo raciocinio do GET: "default" e' o catch-all de erro, nao
+          # sucesso. HEAD nao tem corpo, entao so o status importa.
+          default:
+            statusCode: "502"
   "/fallback/{key+}":
     get:
       parameters:
