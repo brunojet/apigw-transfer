@@ -8,7 +8,7 @@
 //     cobre o caso comum de uma invocação concorrente já ter terminado).
 //  2. Se não existe, tenta o lock distribuído (S3) em UMA tentativa (não
 //     bloqueante). Se já está travado por outra invocação, responde
-//     503 + Retry-After na hora -- quem espera é o cliente (polling),
+//     202 + Retry-After na hora -- quem espera é o cliente (polling),
 //     sem custo de Lambda parada.
 //  3. Busca no prefixo "origin/" do mesmo bucket (origem simulada -- ver
 //     memória de projeto).
