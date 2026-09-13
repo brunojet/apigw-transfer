@@ -1,7 +1,8 @@
 # ADR 0001 — Proxy de download via API Gateway direto ao S3
 
-**Status:** Aceito (PoC validada contra AWS real) — mTLS e token do banco
-ainda pendentes (ver seção "O que falta").
+**Status:** Proposta (PoC validada contra AWS real) — falta aplicar a
+esta API o mTLS e a validação de token já em produção para outro BFF da
+organização (ver seção "O que falta").
 **Data:** 2026-09-13
 **Contexto do projeto:** [apigw-transfer](../../README.md) · detalhes
 completos de implementação e histórico de achados em [SPEC.md](../../SPEC.md)
@@ -9,17 +10,30 @@ e [PLAN.md](../../PLAN.md).
 
 ## Contexto
 
-O conglomerado tem um padrão consolidado para exposição de APIs a
-consumidores externos: **API Gateway com mTLS e token de acesso
-governado pelo banco** — já em uso nas demais APIs expostas pela
-organização. Este projeto parte de uma pergunta natural de extensão
-desse padrão: como aplicá-lo também ao cenário de **expor arquivos
-privados do S3 a um consumidor externo**, incluindo arquivos grandes
-(dezenas a centenas de MB)?
+A organização mantém uma loja de aplicativos baseados em ServiceNow,
+totalmente customizados. Um desses aplicativos (POS) já passou por uma
+migração de WebView para Android nativo + APIs REST, com um BFF que faz
+a transformação entre o POS e o ServiceNow — inclusive gerenciando os
+tokens do ServiceNow de forma transparente, sem expor esse detalhe ao
+POS. Para esse BFF já existe em produção a infraestrutura de **API
+Gateway com mTLS e token de acesso governado pelo banco** — o padrão
+consolidado da organização para exposição de APIs a consumidores
+externos.
 
-A pergunta técnica que motivou a PoC: dá para servir esses arquivos
-através do padrão de API Gateway, sem introduzir compute
-(Lambda/aplicação) no caminho de transferência do binário?
+O que ainda falta nesse fluxo é a **recepção de arquivos binários**
+(imagens e APKs) vindos do ServiceNow através desse mesmo canal. Como o
+LDM já é a peça principal do conglomerado para gestão de aplicativos,
+por ora o suporte via este canal cobre só **imagens** — mas como ainda
+não existe integração entre a loja de aplicativos e o LDM, o mesmo
+mecanismo já resolveria a transferência de **APKs** de forma incidental,
+trazendo de quebra capacidades de retomada de download e observabilidade
+que esse fluxo não tem hoje.
+
+A pergunta técnica que motivou esta PoC: dá para servir esses arquivos —
+potencialmente grandes (dezenas a centenas de MB, no caso de um APK) —
+através do mesmo padrão de API Gateway já em produção para esse BFF, sem
+introduzir compute (Lambda/aplicação) no caminho de transferência do
+binário?
 
 ## Decisão
 
@@ -68,9 +82,12 @@ bucket. Três elementos centrais:
 **Negativas / trade-offs aceitos:**
 - A lógica de transformação de requisição (VTL/Velocity) tem
   particularidades reais e não óbvias (ex.: hífen é caractere válido em
-  nome de referência, quebrando `"bytes=$rangeStart-$rangeEnd"` de forma
-  silenciosa — ver SPEC.md §9) — exige testar contra a AWS real, não só
-  ler a documentação.
+  nome de referência, o que quebrava `"bytes=$rangeStart-$rangeEnd"` de
+  forma silenciosa — encontrado e corrigido, ver SPEC.md §9). O trade-off
+  que fica não é sobre o estado atual (já validado contra AWS real,
+  funcionando) — é de processo: esse tipo de particularidade só aparece
+  testando contra a AWS de verdade, não lendo a documentação; qualquer
+  mudança futura nessa VTL precisa do mesmo rigor de validação.
 - `binary_media_types` mal configurado corrompe silenciosamente tanto
   corpo de erro (bloqueando VTL) quanto corpo binário de sucesso — é uma
   fonte de bugs sutis específica dessa abordagem (ver SPEC.md §5).
@@ -88,12 +105,14 @@ bucket. Três elementos centrais:
 
 ## O que falta
 
-Fora de escopo desta rodada, mas necessário antes de produção real:
+Não é um risco em aberto — mTLS e a validação de token do banco já rodam
+em produção para o BFF POS↔ServiceNow, então isso não é um desenho a
+validar. Não foram cabeados **nesta PoC** simplesmente porque não
+agregam nada ao que este documento está validando (a mecânica de
+transferência via API Gateway direto ao S3) — em uma implementação real,
+seria só reaproveitar a configuração e o mecanismo já existentes, não um
+trabalho novo.
 
-- **mTLS** (custom domain + truststore) — quem fornece a CA ainda não
-  está definido.
-- **Validação do token do banco** — formato (JWT nativo vs. Lambda
-  authorizer custom) ainda não especificado.
-
-Ver [SPEC.md §8](../../SPEC.md) (questões em aberto) para o detalhamento
-completo dessas pendências.
+Ver [SPEC.md §8](../../SPEC.md) para os detalhes específicos desta
+integração (qual CA usar no truststore, claims exatas do token) a
+confirmar com quem mantém o BFF existente.
