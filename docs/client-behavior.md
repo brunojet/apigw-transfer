@@ -178,7 +178,9 @@ flowchart TD
 | `202` no `/fallback/{key}` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita concorrência desnecessária de Lambda. |
 | `302` no `/fallback/{key}` | Seguir o `Location` (path relativo, já inclui o stage) — geralmente volta pro path direto, que agora deve responder `200`/`206`. |
 | `404` no `/fallback/{key}` | Erro **permanente** — o objeto não existe nem na origem simulada. Não adianta repetir. |
-| `500` (qualquer endpoint) | Erro transitório — retry com backoff exponencial (ex.: 1s, 2s, 4s..., com teto e número máximo de tentativas). |
+| `403` no path direto | Erro **permanente** — acesso negado à key. Não adianta repetir. |
+| `416` no path direto | Erro **permanente** pro offset pedido — o `Range` começa além do fim do objeto (ex.: arquivo local maior que o remoto). Não repetir o mesmo offset; revalidar tamanho/`ETag` com `HEAD`. |
+| `500`/`502` (qualquer endpoint) | Erro transitório — retry com backoff exponencial (ex.: 1s, 2s, 4s..., com teto e número máximo de tentativas). `502` é o catch-all do path direto pra qualquer status do S3 sem mapeamento próprio. |
 | Timeout de rede | Tratar como erro transitório — retry com backoff, igual a um 500. |
 | Consistência entre chunks | Guardar o `ETag` do `HEAD` inicial e mandar `If-Match: <etag>` em todo `GET` com `Range` — se o arquivo mudar no meio do download, o S3 responde `412 Precondition Failed` (o servidor repassa isso, não mascara como 200). |
 | `412` num chunk | Erro **permanente pro download em andamento** — o objeto mudou de versão no meio do processo. Não adianta retentar o mesmo chunk; é preciso descartar o que já foi baixado e recomeçar do zero com a versão atual (novo `HEAD`, novo `ETag`). |

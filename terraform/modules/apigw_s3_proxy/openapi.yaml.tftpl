@@ -38,7 +38,7 @@ paths:
             type: "string"
       responses:
         "200":
-          description: "inalcancavel por design -- o servidor sempre injeta um Range (ver requestTemplates abaixo), entao o S3 sempre responde 206. Mantido documentado porque a integration response 'default' ainda mapeia pra 200 (catch-all pra status nao listados aqui)."
+          description: "defensivo -- o servidor sempre injeta um Range (ver requestTemplates abaixo), entao o S3 normalmente responde 206. Mapeado explicitamente (selectionPattern 200) pra nao depender do 'default', que e' so erro."
           headers:
             Content-Type: { schema: { type: "string" } }
             Content-Length: { schema: { type: "string" } }
@@ -59,6 +59,18 @@ paths:
             Cache-Control: { schema: { type: "string" } }
         "412":
           description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
+        "403":
+          description: "acesso negado pelo S3 (key fora da permissao da role) -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+        "416":
+          description: "Range alem do fim do objeto -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+        "502":
+          description: "qualquer outro status do S3 (catch-all) -- corpo generico, sem o XML do S3"
+          headers:
+            Content-Type: { schema: { type: "string" } }
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "GET"
@@ -113,13 +125,35 @@ paths:
             ## original (SPEC.md §9).
             #set($context.requestOverride.header.Range = "bytes=$${rangeStart}-$${rangeEnd}")
         responses:
+          # "default" (sem selectionPattern) pega QUALQUER status nao listado
+          # abaixo -- por isso e' erro (502), nunca 200. Antes, 403/416/5xx
+          # do S3 saiam como 200 com o XML de erro no corpo (que ainda expoe
+          # conta e ARN da role). Erros usam corpo JSON generico.
           default:
+            statusCode: "502"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":502,"detail":"upstream error"}'
+          "200":
             statusCode: "200"
             responseParameters:
               method.response.header.Content-Type: "integration.response.header.Content-Type"
               method.response.header.Content-Length: "integration.response.header.Content-Length"
               method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
               method.response.header.ETag: "integration.response.header.ETag"
+          "403":
+            statusCode: "403"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":403,"detail":"access denied"}'
+          "416":
+            statusCode: "416"
+            responseParameters:
+              method.response.header.Content-Type: "'application/json'"
+            responseTemplates:
+              $default: '{"status":416,"detail":"requested range not satisfiable"}'
           "206":
             statusCode: "206"
             responseParameters:
@@ -175,6 +209,10 @@ paths:
           headers:
             Location: { schema: { type: "string" } }
             Cache-Control: { schema: { type: "string" } }
+        "403":
+          description: "acesso negado pelo S3 (key fora da permissao da role)"
+        "502":
+          description: "qualquer outro status do S3 (catch-all)"
       x-amazon-apigateway-integration:
         type: "aws"
         httpMethod: "HEAD"
@@ -184,7 +222,13 @@ paths:
         requestParameters:
           integration.request.path.key: "method.request.path.key"
         responses:
+          # Mesmo raciocinio do GET: "default" e' o catch-all de erro, nao
+          # sucesso. HEAD nao tem corpo, entao so o status importa.
           default:
+            statusCode: "502"
+          "403":
+            statusCode: "403"
+          "200":
             statusCode: "200"
             responseParameters:
               method.response.header.Content-Type: "integration.response.header.Content-Type"
