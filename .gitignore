@@ -1,0 +1,47 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+tfplan
+*.tfplan
+
+# Credentials & keys (nunca commitar)
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Backup/autosave do editor Draw.io Integration
+.$*.drawio.bkp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Downloads de teste (scripts/download_range.py, scripts/probe-range-ceiling.sh)
+*.bin
+download.bin
+
+# Python
+__pycache__/
+*.pyc
+
+# Go build artifacts (scripts/build-lambda.sh regenera)
+/build/
+*.exe
+
+# Sidecars de ETag do scripts/download_range.py (retomada de download)
+*.etag

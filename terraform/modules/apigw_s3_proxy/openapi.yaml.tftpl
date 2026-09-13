@@ -1,0 +1,243 @@
+# Contrato da API — gerado a partir deste template pelo Terraform
+# (templatefile em main.tf). Isso é o que "compete ao contrato": paths,
+# methods, integrações com o S3, mapeamento de headers/status. O Terraform
+# só injeta os valores (região, bucket, role) e gerencia o wrapper de
+# infra (REST API, deployment, stage, IAM, binary_media_types -- esse
+# último fica como atributo nativo do aws_api_gateway_rest_api, não como
+# extensão aqui, porque PutRestApi em modo "overwrite" não honra
+# x-amazon-apigateway-binary-media-types de forma confiável em updates).
+#
+# Ref.: SPEC.md seção 4 (fluxo) e seção 5 (binary media types / teto de
+# payload). Sem mTLS/autorização nesta rodada (adiado — PLAN.md Fases 4-5).
+#
+# 404 -> 302 -> /fallback/{key} -> 302 -> 200/206: totalmente transparente
+# pra um cliente HTTP que segue redirect (curl -L, browsers, a maioria das
+# libs) -- ver detalhes no comentário do bloco "404" abaixo.
+openapi: "3.0.1"
+info:
+  title: "${api_name}"
+  version: "1.0"
+paths:
+  "/{key+}":
+    get:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+        - name: "Range"
+          in: "header"
+          required: false
+          schema:
+            type: "string"
+        - name: "If-Match"
+          in: "header"
+          required: false
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "inalcancavel por design -- o servidor sempre injeta um Range (ver requestTemplates abaixo), entao o S3 sempre responde 206. Mantido documentado porque a integration response 'default' ainda mapeia pra 200 (catch-all pra status nao listados aqui)."
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+            ETag: { schema: { type: "string" } }
+        "206":
+          description: "chunk parcial (requisicao com Range)"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Content-Range: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+            ETag: { schema: { type: "string" } }
+        "302":
+          description: "objeto ausente no S3 -- redirect pro /fallback/{key} (cliente resolve o template)"
+          headers:
+            Location: { schema: { type: "string" } }
+            Cache-Control: { schema: { type: "string" } }
+        "412":
+          description: "If-Match nao bate -- objeto mudou desde o ETag que o cliente tinha (ver docs/client-behavior.md)"
+      x-amazon-apigateway-integration:
+        type: "aws"
+        httpMethod: "GET"
+        uri: "arn:aws:apigateway:${aws_region}:s3:path/$${stageVariables.bucketName}/{key}"
+        credentials: "${execution_role_arn}"
+        passthroughBehavior: "when_no_match"
+        requestParameters:
+          integration.request.path.key: "method.request.path.key"
+          integration.request.header.If-Match: "method.request.header.If-Match"
+        requestTemplates:
+          # $default (nao "application/json") -- GET normalmente nao manda
+          # Content-Type, e com passthroughBehavior=when_no_match a falta
+          # de match faria a requisicao passar sem transformacao nenhuma,
+          # ou seja, o clamp de Range nunca rodaria de verdade.
+          #
+          # Mesclado aqui a partir do spike /test-range-clamp/{key+}
+          # (removido -- ver SPEC.md §9 pro histórico completo, incluindo
+          # o bug real de hífen-em-nome-de-referência do Velocity e a
+          # validação empírica dos 3 casos contra a AWS real).
+          $default: |
+            #set($Integer = 0)
+            #set($maxChunk = $Integer.parseInt($stageVariables.maxChunkBytes))
+            #set($rawRange = $input.params('Range'))
+            #if($rawRange && $rawRange != "")
+              #set($rangeBody = $rawRange.replaceAll("bytes=", ""))
+              #set($parts = $rangeBody.split("-"))
+              #set($rangeStart = $Integer.parseInt($parts.get(0).trim()))
+              #if($parts.size() > 1 && $parts.get(1) && $parts.get(1).trim() != "")
+                #set($clientEnd = $Integer.parseInt($parts.get(1).trim()))
+                #set($safeEnd = $rangeStart + $maxChunk)
+                #if($clientEnd > $safeEnd)
+                  #set($rangeEnd = $safeEnd)
+                #else
+                  #set($rangeEnd = $clientEnd)
+                #end
+              #else
+                ## "bytes=N-" sem fim definido -> aplica limite a partir do inicio
+                #set($rangeEnd = $rangeStart + $maxChunk)
+              #end
+            #else
+              ## Sem header Range -> assume inicio 0 com limite seguro.
+              ## Todo GET agora sempre vem clampado -- 200 (objeto
+              ## inteiro) vira inalcancavel por design (ver responses acima).
+              #set($rangeStart = 0)
+              #set($rangeEnd = $maxChunk)
+            #end
+            ## $rangeStart-$rangeEnd (sem chaves) NAO funciona: Velocity
+            ## aceita hifen em nome de referencia, entao "$rangeStart-"
+            ## vira o nome de UMA referencia so (inexistente, renderiza
+            ## vazio). $${...} delimita a referencia sem ambiguidade --
+            ## achado real, confirmado via CloudWatch Logs no spike
+            ## original (SPEC.md §9).
+            #set($context.requestOverride.header.Range = "bytes=$${rangeStart}-$${rangeEnd}")
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+              method.response.header.ETag: "integration.response.header.ETag"
+          "206":
+            statusCode: "206"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Content-Range: "integration.response.header.Content-Range"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+              method.response.header.ETag: "integration.response.header.ETag"
+          "412":
+            statusCode: "412"
+          "404":
+            statusCode: "302"
+            responseParameters:
+              # Location dinamico de verdade, montado no responseTemplates
+              # abaixo via $context.responseOverride.header.Location -- por
+              # isso o valor aqui e' so uma referencia de base
+              # (integration.response.header.Location, que o S3 nunca
+              # manda) e nao um literal: um literal como base bloqueia o
+              # override (fica preso no valor estatico, sem erro).
+              method.response.header.Location: integration.response.header.Location
+              method.response.header.Cache-Control: "'no-cache, no-store, must-revalidate'"
+            responseTemplates:
+              # $default (nao "application/json"/"*/*") para funcionar com
+              # qualquer Accept do cliente, sem precisar negociar
+              # content-type. $input.params('key') funciona aqui porque
+              # essa integration response nao e' mais tratada como binaria
+              # -- binary_media_types (ver main.tf) foi restrito aos
+              # content-types reais que o proxy serve; com "*/*" o S3
+              # (application/xml no erro) virava [Binary Data] e VTL nunca
+              # roda em cima de binario ("Unable to transform response",
+              # visivel so com CloudWatch Logs habilitado -- ver memoria de
+              # projeto pra como isso foi diagnosticado).
+              $default: |
+                #set($key = $input.params('key'))
+                #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
+    head:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      responses:
+        "200":
+          description: "descoberta de tamanho (HeadObject)"
+          headers:
+            Content-Type: { schema: { type: "string" } }
+            Content-Length: { schema: { type: "string" } }
+            Accept-Ranges: { schema: { type: "string" } }
+            ETag: { schema: { type: "string" } }
+        "302":
+          description: "objeto ausente no S3 -- redirect pro /fallback/{key} (cliente resolve o template)"
+          headers:
+            Location: { schema: { type: "string" } }
+            Cache-Control: { schema: { type: "string" } }
+      x-amazon-apigateway-integration:
+        type: "aws"
+        httpMethod: "HEAD"
+        uri: "arn:aws:apigateway:${aws_region}:s3:path/$${stageVariables.bucketName}/{key}"
+        credentials: "${execution_role_arn}"
+        passthroughBehavior: "when_no_match"
+        requestParameters:
+          integration.request.path.key: "method.request.path.key"
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Content-Type: "integration.response.header.Content-Type"
+              method.response.header.Content-Length: "integration.response.header.Content-Length"
+              method.response.header.Accept-Ranges: "integration.response.header.Accept-Ranges"
+              method.response.header.ETag: "integration.response.header.ETag"
+          "404":
+            statusCode: "302"
+            responseParameters:
+              # Location dinamico de verdade, montado no responseTemplates
+              # abaixo via $context.responseOverride.header.Location -- por
+              # isso o valor aqui e' so uma referencia de base
+              # (integration.response.header.Location, que o S3 nunca
+              # manda) e nao um literal: um literal como base bloqueia o
+              # override (fica preso no valor estatico, sem erro).
+              method.response.header.Location: integration.response.header.Location
+              method.response.header.Cache-Control: "'no-cache, no-store, must-revalidate'"
+            responseTemplates:
+              # $default (nao "application/json"/"*/*") para funcionar com
+              # qualquer Accept do cliente, sem precisar negociar
+              # content-type. $input.params('key') funciona aqui porque
+              # essa integration response nao e' mais tratada como binaria
+              # -- binary_media_types (ver main.tf) foi restrito aos
+              # content-types reais que o proxy serve; com "*/*" o S3
+              # (application/xml no erro) virava [Binary Data] e VTL nunca
+              # roda em cima de binario ("Unable to transform response",
+              # visivel so com CloudWatch Logs habilitado -- ver memoria de
+              # projeto pra como isso foi diagnosticado).
+              $default: |
+                #set($key = $input.params('key'))
+                #set($context.responseOverride.header.Location = "/$context.stage/fallback/$key")
+  "/fallback/{key+}":
+    get:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        uri: "${fallback_lambda_invoke_arn}"
+        passthroughBehavior: "when_no_match"
+    head:
+      parameters:
+        - name: "key"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        uri: "${fallback_lambda_invoke_arn}"
+        passthroughBehavior: "when_no_match"

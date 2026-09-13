@@ -1,0 +1,76 @@
+<mxfile host="Electron" agent="claude-code">
+  <diagram id="apigw-transfer-arch" name="Arquitetura - apigw-transfer">
+    <mxGraphModel dx="1939" dy="1201" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1150" pageHeight="780" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="cloudGroup" parent="1" style="points=[[0,0],[0.25,0],[0.5,0],[0.75,0],[1,0],[0,1],[0.25,1],[0.5,1],[0.75,1],[1,1],[0,0.25],[0,0.5],[0,0.75],[1,0.25],[1,0.5],[1,0.75]];outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=13;fontStyle=0;container=0;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud_alt;strokeColor=#232F3E;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#232F3E;dashed=0;" value="AWS Cloud" vertex="1">
+          <mxGeometry height="640" width="880" x="220" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=16;fontStyle=1;align=left;verticalAlign=middle;fontColor=#232F3E;" value="apigw-transfer — Proxy de download S3 via API Gateway (sem compute no caminho de dados)" vertex="1">
+          <mxGeometry height="30" width="900" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="regionGroup" parent="1" style="points=[[0,0],[0.25,0],[0.5,0],[0.75,0],[1,0],[0,1],[0.25,1],[0.5,1],[0.75,1],[1,1],[0,0.25],[0,0.5],[0,0.75],[1,0.25],[1,0.5],[1,0.75]];outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=0;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_region;strokeColor=#248814;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#248814;dashed=1;" value="Region: us-east-1" vertex="1">
+          <mxGeometry height="580" width="820" x="250" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="client" parent="1" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#232F3E;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.client;" value="Cliente&lt;br&gt;(curl / Android / script)" vertex="1">
+          <mxGeometry height="78" width="78" x="60" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="apigw" parent="1" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=#F54749;gradientDirection=north;fillColor=#BC1356;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.api_gateway;" value="API Gateway (REST)&lt;br&gt;apigw-transfer" vertex="1">
+          <mxGeometry height="78" width="78" x="330" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="note1" parent="1" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#FFF2CC;strokeColor=#D6B656;fontColor=#232F3E;fontSize=11;align=left;spacingLeft=6;size=14;" value="Stage variables (sem redeploy):&lt;br&gt;• bucketName&lt;br&gt;• maxChunkBytes&lt;br&gt;• notFoundMaxAgeSeconds" vertex="1">
+          <mxGeometry height="90" width="200" x="320" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="iam" parent="1" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=#F54749;gradientDirection=north;fillColor=#BC1356;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.identity_and_access_management_iam;" value="IAM Role&lt;br&gt;(escopo: keys de teste)" vertex="1">
+          <mxGeometry height="66" width="66" x="335" y="555" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" parent="1" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=#4D72F3;gradientDirection=north;fillColor=#3334B9;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;" value="S3 bucket&lt;br&gt;brunojet-media-proxy-dev&lt;br&gt;(path direto + origin/)" vertex="1">
+          <mxGeometry height="78" width="78" x="930" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="lambda" parent="1" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=#F78E04;gradientDirection=north;fillColor=#D05C17;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" value="Lambda&lt;br&gt;fallback (cache-miss)&lt;br&gt;&lt;i&gt;compute a criterio --&lt;br&gt;ECS/EKS tb serviriam&lt;/i&gt;" vertex="1">
+          <mxGeometry height="78" width="78" x="930" y="550" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;startArrow=classic;startFill=1;endArrow=classic;endFill=1;fontSize=11;fontColor=#232F3E;strokeColor=#232F3E;" target="apigw" value="GET/HEAD /{key+}&lt;br&gt;Range: bytes=offset-&lt;br&gt;⇔ 206 + Content-Range">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;startArrow=classic;startFill=1;endArrow=classic;endFill=1;fontSize=11;fontColor=#232F3E;strokeColor=#232F3E;" target="s3" value="GetObject/HeadObject&lt;br&gt;(Service Proxy + clamp via VTL)&lt;br&gt;⇔ 206 + Content-Range">
+          <mxGeometry relative="1" x="-0.5543" y="-21" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="960" y="360" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="lambda" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;startArrow=classic;startFill=1;endArrow=classic;endFill=1;fontSize=11;fontColor=#666666;strokeColor=#666666;" target="s3" value="origin/{key}: GetObject&lt;br&gt;path direto: PutObject&lt;br&gt;GetLock/ReleaseLock (nao-bloqueante)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="980" y="400" />
+              <mxPoint x="980" y="400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;startArrow=classic;startFill=1;endArrow=classic;endFill=1;fontSize=11;fontColor=#666666;strokeColor=#666666;" value="cache-miss: 404 → 302 → /fallback/{key} → invoke&lt;br&gt;⇔ 302 sucesso / 202 + Retry-After">
+          <mxGeometry relative="1" x="0.0462" y="20" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="960" y="407" />
+              <mxPoint x="960" y="557" />
+            </Array>
+            <mxPoint x="410" y="407" as="sourcePoint" />
+            <mxPoint x="952" y="557" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="iam" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;endArrow=open;endFill=0;fontSize=10;fontColor=#999999;strokeColor=#999999;" target="apigw" value="permissions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="iam" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;endArrow=open;endFill=0;fontSize=10;fontColor=#999999;strokeColor=#999999;" target="lambda" value="permissions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="legend" parent="1" style="text;html=1;fontSize=11;align=left;verticalAlign=top;fontColor=#666666;" value="Linha cheia = caminho de dados (sem compute)&lt;br&gt;Linha tracejada = cache-miss (unico caminho com Lambda)&lt;br&gt;Cinza fino = permissoes IAM" vertex="1">
+          <mxGeometry height="60" width="420" x="240" y="700" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
