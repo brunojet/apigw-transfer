@@ -36,11 +36,11 @@ servidor é montado.
   não precisa montar nem resolver nada manualmente.
 - **Concorrência:** se `/fallback/{key}` responder `202`, o cliente
   **precisa** respeitar o header `Retry-After` antes de tentar de novo —
-  não é opcional, é o mecanismo que evita buscas duplicadas na origem. Na
-  PoC o fallback é uma Lambda síncrona (quem pega o lock recebe `302` ao
-  fim da cópia); no desenho final o fallback é assíncrono e responde `202`
-  **a todos, inclusive na primeira requisição** (ver ADR 0001). O cliente
-  deve tratar `202` a qualquer momento da cadeia.
+  não é opcional, é o mecanismo que evita buscas duplicadas na origem. O
+  fallback é assíncrono: responde `202` **a todos, inclusive a quem
+  disparou a cópia** (ver ADR 0001). O cliente repete a requisição
+  original depois do `Retry-After`; quando a cópia termina, a cadeia
+  resolve em `302` → `200`/`206`.
 
 ## 2. Caminho feliz — arquivo já existe
 
@@ -71,13 +71,17 @@ sequenceDiagram
 
 ## 3. Cache-miss — arquivo existe na origem simulada
 
+Na PoC o fallback é uma Lambda que dispara a cópia numa autoinvocação
+assíncrona (no desenho final, o BFF faz o mesmo papel).
+
 ```mermaid
 sequenceDiagram
     participant C as Cliente
     participant AGW as API Gateway
     participant S3d as S3 (path direto)
-    participant L as Lambda fallback
-    participant S3o as S3 (origin/)
+    participant L as Fallback (requisição)
+    participant W as Fallback (cópia assíncrona)
+    participant S3o as Origem
 
     C->>AGW: HEAD /{key}
     AGW->>S3d: HeadObject(key)
@@ -86,27 +90,34 @@ sequenceDiagram
 
     Note over C: cliente só segue o redirect (automático)
 
-    C->>AGW: GET /fallback/{key}
+    C->>AGW: HEAD /fallback/{key}
     AGW->>L: invoke (Lambda proxy)
-    L->>S3d: HeadObject(key) — corrida com outra invocação?
+    L->>S3d: HeadObject(key) — já foi copiado?
     S3d-->>L: 404 (não existe ainda)
     L->>S3d: GetLock(key) — tentativa única
     S3d-->>L: lock adquirido
-    L->>S3o: GetObject(origin/key)
-    S3o-->>L: 200, stream
-    L->>S3d: PutObject(key, stream)
-    S3d-->>L: 200
-    L->>S3d: ReleaseLock(key)
-    L-->>AGW: 302, Location: /{stage}/{key}
-    AGW-->>C: 302, Location: /{stage}/{key}
+    L->>S3o: HeadObject(origin/key) — existe na origem?
+    S3o-->>L: 200
+    L-)W: invoke assíncrono {copyKey} (fica dono do lock)
+    L-->>AGW: 202, Retry-After: 5
+    AGW-->>C: 202, Retry-After: 5
 
-    Note over C: segue o Location — volta pro caminho feliz
+    par cópia em background
+        W->>S3o: GetObject(origin/key)
+        W->>S3d: PutObject(key, stream)
+        W->>S3d: ReleaseLock(key)
+    and cliente espera
+        Note over C: aguarda Retry-After e repete a requisição original
+    end
 
     C->>AGW: HEAD /{key}
     AGW->>S3d: HeadObject(key)
     S3d-->>AGW: 200, Content-Length=N
-    AGW-->>C: 200
+    AGW-->>C: 200 — volta pro caminho feliz
 ```
+
+Se a cópia ainda não terminou na repetição, a cadeia passa de novo por
+`/fallback/{key}`, que responde `202` (lock ocupado) até o objeto existir.
 
 ## 4. Concorrência — dois clientes pedem a mesma key ao mesmo tempo
 
@@ -115,7 +126,8 @@ sequenceDiagram
     participant A as Cliente A
     participant B as Cliente B
     participant AGW as API Gateway
-    participant L as Lambda fallback
+    participant L as Fallback (requisição)
+    participant W as Fallback (cópia assíncrona)
     participant S3 as S3
 
     par quase simultâneo
@@ -126,27 +138,25 @@ sequenceDiagram
         AGW->>L: invoke (B)
     end
 
-    L->>S3: GetLock(key)  [invocação de A processa primeiro]
+    L->>S3: GetLock(key)  [requisição de A chega primeiro]
     S3-->>L: lock adquirido (A)
-    L->>S3: GetLock(key)  [invocação de B]
+    L-)W: invoke assíncrono {copyKey}
+    L-->>AGW: 202, Retry-After: 5   (resposta pra A)
+    AGW-->>A: 202, Retry-After: 5
+    L->>S3: GetLock(key)  [requisição de B]
     S3-->>L: lock já existe (B)
-
     L-->>AGW: 202, Retry-After: 5   (resposta pra B)
     AGW-->>B: 202, Retry-After: 5
-    Note over B: aguarda 5s antes de tentar de novo
 
-    Note over L: invocação de A segue buscando + subindo pro S3
-    L->>S3: fetch origin/key + PutObject(key)
-    S3-->>L: OK
-    L-->>AGW: 302, Location: /{stage}/{key}   (resposta pra A)
-    AGW-->>A: 302, Location: /{stage}/{key}
+    W->>S3: fetch origin/key + PutObject(key) + ReleaseLock(key)
 
-    B->>AGW: GET /fallback/{key}  (retry após 5s)
-    AGW->>L: invoke (B, 2ª tentativa)
-    L->>S3: HeadObject(key) — já existe (A terminou)
-    S3-->>L: 200
+    Note over A,B: os dois aguardam Retry-After e repetem a requisição
+    A->>AGW: GET /fallback/{key}  (retry)
+    AGW->>L: invoke
+    L->>S3: HeadObject(key) — já existe (cópia terminou)
     L-->>AGW: 302, Location: /{stage}/{key}   (sem refazer o fetch)
-    AGW-->>B: 302, Location: /{stage}/{key}
+    AGW-->>A: 302, Location: /{stage}/{key}
+    Note over B: B recebe o mesmo 302 no seu retry
 ```
 
 ## 5. Fluxo de decisão do cliente

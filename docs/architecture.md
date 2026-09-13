@@ -31,7 +31,7 @@ compute que uma integração via Lambda implicaria.
 | Integração de download | AWS Service Proxy (`GET`/`HEAD /{key+}`) | Traduz a requisição em `GetObject`/`HeadObject` no S3; uma transformação de requisição (VTL) ajusta/injeta o header `Range` pra nunca ultrapassar o teto de payload |
 | Armazenamento | Amazon S3 (privado) | Bucket já existente, reaproveitado de um projeto anterior — nunca criado por este projeto |
 | Configuração em runtime | Stage variables do API Gateway | Bucket alvo, teto de tamanho de chunk e tempo de cache de erro — ajustáveis sem novo deployment da API |
-| Cache-miss (fallback) | PoC: AWS Lambda síncrona (`cmd/fallback`). Final: o BFF, assíncrono | Só entra em ação quando o objeto ainda não existe no path direto: busca na origem, copia pro path direto. Na PoC redireciona de volta ao fim da cópia; no desenho final responde `202` a todos enquanto copia em background (ADR 0001) |
+| Cache-miss (fallback) | PoC: AWS Lambda (`cmd/fallback`) com autoinvocação assíncrona. Final: o BFF | Só entra em ação quando o objeto ainda não existe no path direto: responde `202` a todos e copia da origem pro path direto em background (ADR 0001) |
 | Origem simulada | Amazon S3 (mesmo bucket, prefixo `origin/`) | Substitui uma origem externa real pra fins de PoC |
 | Concorrência | Lock não-bloqueante no S3 | Evita múltiplas execuções do fallback buscarem o mesmo objeto ao mesmo tempo; quem perde a corrida recebe `202` + `Retry-After` |
 | Permissão de acesso ao S3 | IAM Role de execução do API Gateway | Escopada só aos objetos de teste, não ao bucket inteiro |
@@ -68,11 +68,17 @@ Quando o objeto não existe no path direto, o `404` do S3 é convertido em
 para `/fallback/{key}`. Esse endpoint, sim, aciona o serviço de fallback
 (Lambda nesta implementação — ver §2), que:
 
-1. Confere se o objeto já existe (corrida com outra invocação).
+1. Confere se o objeto já existe (cópia já terminou) e, se sim, redireciona
+   de volta.
 2. Tenta um lock não-bloqueante no S3; se já travado, responde `202` +
-   `Retry-After` na hora, sem segurar o fallback esperando.
-3. Busca o objeto no prefixo `origin/` (origem simulada), copia pro path
-   direto, libera o lock e redireciona de volta.
+   `Retry-After` na hora.
+3. Com o lock, confere se o objeto existe na origem (`404` cacheável se
+   não), dispara a cópia numa invocação assíncrona — que fica dona do
+   lock e o libera ao terminar — e responde `202` + `Retry-After`.
+
+A requisição nunca espera a cópia: o tempo de cópia não depende do
+timeout de integração do API Gateway, só do timeout da função (TTL do lock
+≥ timeout, garantido por precondição no Terraform).
 
 Consistência entre blocos de um mesmo download usa `If-Match`/`ETag`
 nativos do S3 — se o objeto mudar de versão no meio do processo, a
