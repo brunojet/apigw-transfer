@@ -64,6 +64,40 @@ bucket. Três elementos centrais:
    stage do API Gateway, não embutidas no corpo da API — ajustá-los não
    dispara um novo deployment.
 
+## Ganhos em relação ao fluxo atual (via ServiceNow)
+
+- **A proposta imediata é imagens — que nem exigiriam range/resume dado
+  o tamanho pequeno — mas a mesma infraestrutura já está validada para
+  arquivos grandes.** O objeto de teste desta PoC tem ~109 MB, na faixa
+  de tamanho de um APK, e foi baixado (e retomado) de ponta a ponta sem
+  nenhum trabalho de infraestrutura adicional. Ou seja: estender esse
+  canal pra APKs no futuro é uma decisão de escopo, não um novo projeto
+  de engenharia.
+- **Retomada de download em caso de perda de conexão.** O uso nativo de
+  `Range`/`Content-Range`/`If-Match` permite a um cliente interrompido
+  continuar exatamente do byte onde parou, em vez de reiniciar o arquivo
+  inteiro — validado tanto com o recurso nativo de resume do `curl`
+  (`-C -`) quanto com o cliente de referência
+  (`scripts/download_range.py`). Pouco relevante pra imagens pequenas,
+  mas decisivo pra arquivos grandes (como um APK) em conectividade
+  instável — hoje uma queda de conexão no meio de um download desses
+  obriga a recomeçar do zero.
+- **Compressão transparente ponta a ponta.** O ServiceNow também suporta
+  compressão no backend, mas ela não está habilitada hoje no caminho via
+  API Gateway do BFF existente — o ganho potencial fica sem uso. Nesta
+  solução, `Accept-Encoding`/`Content-Encoding` funcionam de ponta a
+  ponta (validado empiricamente: ~14% de redução real no objeto de
+  teste), sem exigir nada do cliente além de uma lib HTTP que já suporte
+  isso — a maioria suporta, nativamente.
+- **Maior capacidade e resiliência.** A transferência do binário em si
+  não passa pelo ServiceNow — só o cache-miss inicial aciona o fallback
+  pra buscar da origem uma vez; toda leitura seguinte do mesmo arquivo
+  vem direto do S3. Isso tira do ServiceNow a carga de servir bytes
+  repetidamente para o mesmo arquivo (e os limites de capacidade/
+  throughput inerentes a uma instância ServiceNow), deixando S3 e API
+  Gateway — dimensionados justamente para esse tipo de carga — como
+  responsáveis pela distribuição.
+
 ## Consequências
 
 **Positivas:**
