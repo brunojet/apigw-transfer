@@ -8,7 +8,18 @@ servidor é montado.
 
 ## 1. Visão geral do contrato
 
-- **Descoberta de tamanho:** `HEAD /{key}` é **recomendado, mas não
+Rotas:
+
+```
+GET/HEAD /files-delivery/{fileDeliveryId}/files/{fileId}            (arquivo)
+GET/HEAD /files-delivery/{fileDeliveryId}/retrievals/{retrievalId}  (busca na origem)
+```
+
+`fileDeliveryId` é o canal (`image`, `apk`), `fileId` o identificador
+imutável do arquivo e `retrievalId` é igual ao `fileId`. Abaixo, `files` e
+`retrievals` abreviam essas duas rotas.
+
+- **Descoberta de tamanho:** `HEAD` em `files` é **recomendado, mas não
   mais obrigatório** (mudou depois do merge do clamp reativo em
   produção — ver SPEC.md §9). O servidor sempre limita/injeta o `Range`
   antes de repassar ao S3, então até o **primeiro `GET`** (com ou sem
@@ -17,7 +28,7 @@ servidor é montado.
   fazer `GET`s em loop, olhando `Content-Range` a cada resposta. `HEAD`
   continua útil se você quer confirmar existência/`ETag` antes de
   começar a escrever no disco, mas não é mais uma etapa obrigatória.
-- **Download:** `GET /{key}` em blocos — o cliente pede
+- **Download:** `GET` em `files` em blocos — o cliente pede
   `Range: bytes={offset}-` (aberto, sem fim) e o **servidor** decide
   quanto devolve por resposta (nunca mais que o teto configurado — ver
   SPEC.md §5/§9). O cliente não escolhe/calcula tamanho de bloco; avança
@@ -27,14 +38,14 @@ servidor é montado.
   multi-range, `bytes=N-M/total`, fim menor que início) é **ignorado** e
   tratado como `bytes=0-` — o cliente deve conferir que o início do
   `Content-Range` é o offset pedido antes de gravar o bloco.
-- **Cache-miss:** se `/{key}` responder `404`, o servidor responde `302`
+- **Cache-miss:** se o arquivo ainda não estiver no S3, `files` responde `302`
   com um `Location` **já totalmente resolvido** (ex.:
-  `/dev/fallback/apigw-transfer-fallback-test.bin`, montado dinamicamente
+  `/dev/files-delivery/apk/retrievals/9b1e7d3c5a2f4e6b8c0d1a3e5f7b9c2d`, montado dinamicamente
   no servidor via VTL — ver módulo `apigw_s3_proxy`). O cliente pode
   **seguir esse redirect automaticamente**, igual qualquer `302` HTTP
   normal (`curl -L`, browsers, a maioria das libs fazem isso sozinhas) —
   não precisa montar nem resolver nada manualmente.
-- **Concorrência:** se `/fallback/{key}` responder `202`, o cliente
+- **Concorrência:** se `retrievals` responder `202`, o cliente
   **precisa** respeitar o header `Retry-After` antes de tentar de novo —
   não é opcional, é o mecanismo que evita buscas duplicadas na origem. O
   fallback é assíncrono: responde `202` **a todos, inclusive a quem
@@ -54,13 +65,13 @@ sequenceDiagram
     participant AGW as API Gateway
     participant S3 as S3 (bucket)
 
-    C->>AGW: HEAD /{key}  (opcional -- ver §1)
+    C->>AGW: HEAD files  (opcional -- ver §1)
     AGW->>S3: HeadObject(key)
     S3-->>AGW: 200, Content-Length=N, ETag
     AGW-->>C: 200, Content-Length=N, ETag
 
     loop enquanto offset < N
-        C->>AGW: GET /{key}  Range: bytes=offset-  (aberto)
+        C->>AGW: GET files  Range: bytes=offset-  (aberto)
         AGW->>S3: GetObject(key, Range ajustado pelo servidor)
         S3-->>AGW: 206, Content-Range: bytes offset-Y/N
         AGW-->>C: 206, chunk binário (tamanho decidido pelo servidor)
@@ -83,14 +94,14 @@ sequenceDiagram
     participant W as Fallback (cópia assíncrona)
     participant S3o as Origem
 
-    C->>AGW: HEAD /{key}
+    C->>AGW: HEAD files
     AGW->>S3d: HeadObject(key)
     S3d-->>AGW: 404 NoSuchKey
-    AGW-->>C: 302, Location: /{stage}/fallback/{key} (já resolvido)
+    AGW-->>C: 302, Location: /{stage}/files-delivery/{fileDeliveryId}/retrievals/{fileId} (já resolvido)
 
     Note over C: cliente só segue o redirect (automático)
 
-    C->>AGW: HEAD /fallback/{key}
+    C->>AGW: HEAD retrievals
     AGW->>L: invoke (Lambda proxy)
     L->>S3d: HeadObject(key) — já foi copiado?
     S3d-->>L: 404 (não existe ainda)
@@ -98,7 +109,7 @@ sequenceDiagram
     S3d-->>L: lock adquirido
     L->>S3o: HeadObject(origin/key) — existe na origem?
     S3o-->>L: 200
-    L-)W: invoke assíncrono {copyKey} (fica dono do lock)
+    L-)W: invoke assíncrono {fileDeliveryId, fileId} (fica dono do lock)
     L-->>AGW: 202, Retry-After: 5
     AGW-->>C: 202, Retry-After: 5
 
@@ -110,14 +121,14 @@ sequenceDiagram
         Note over C: aguarda Retry-After e repete a requisição original
     end
 
-    C->>AGW: HEAD /{key}
+    C->>AGW: HEAD files
     AGW->>S3d: HeadObject(key)
     S3d-->>AGW: 200, Content-Length=N
     AGW-->>C: 200 — volta pro caminho feliz
 ```
 
 Se a cópia ainda não terminou na repetição, a cadeia passa de novo por
-`/fallback/{key}`, que responde `202` (lock ocupado) até o objeto existir.
+`retrievals`, que responde `202` (lock ocupado) até o objeto existir.
 
 ## 4. Concorrência — dois clientes pedem a mesma key ao mesmo tempo
 
@@ -131,16 +142,16 @@ sequenceDiagram
     participant S3 as S3
 
     par quase simultâneo
-        A->>AGW: GET /fallback/{key}
+        A->>AGW: GET retrievals
         AGW->>L: invoke (A)
     and
-        B->>AGW: GET /fallback/{key}
+        B->>AGW: GET retrievals
         AGW->>L: invoke (B)
     end
 
     L->>S3: GetLock(key)  [requisição de A chega primeiro]
     S3-->>L: lock adquirido (A)
-    L-)W: invoke assíncrono {copyKey}
+    L-)W: invoke assíncrono {fileDeliveryId, fileId}
     L-->>AGW: 202, Retry-After: 5   (resposta pra A)
     AGW-->>A: 202, Retry-After: 5
     L->>S3: GetLock(key)  [requisição de B]
@@ -151,11 +162,11 @@ sequenceDiagram
     W->>S3: fetch origin/key + PutObject(key) + ReleaseLock(key)
 
     Note over A,B: os dois aguardam Retry-After e repetem a requisição
-    A->>AGW: GET /fallback/{key}  (retry)
+    A->>AGW: GET retrievals  (retry)
     AGW->>L: invoke
     L->>S3: HeadObject(key) — já existe (cópia terminou)
-    L-->>AGW: 302, Location: /{stage}/{key}   (sem refazer o fetch)
-    AGW-->>A: 302, Location: /{stage}/{key}
+    L-->>AGW: 302, Location: /{stage}/files-delivery/{fileDeliveryId}/files/{fileId}   (sem refazer o fetch)
+    AGW-->>A: 302, Location: /{stage}/files-delivery/{fileDeliveryId}/files/{fileId}
     Note over B: B recebe o mesmo 302 no seu retry
 ```
 
@@ -163,9 +174,9 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A["HEAD /key (opcional)"] --> B{status}
+    A["HEAD files (opcional)"] --> B{status}
     B -->|200| C["Content-Length/ETag conhecidos"]
-    C --> D["GET /key  Range: bytes=offset-  (aberto)"]
+    C --> D["GET files  Range: bytes=offset-  (aberto)"]
     D --> E{status}
     E -->|206| V{"Content-Range começa em offset?"}
     V -->|sim| F["offset += bytes recebidos"]
@@ -180,7 +191,7 @@ flowchart TD
     B -->|403| P
 
     B -->|302| I["segue Location (já resolvido pelo servidor)"]
-    I --> J["GET /fallback/key"]
+    I --> J["GET retrievals"]
     J --> K{status}
     K -->|302| L["segue Location"]
     L --> A
@@ -194,15 +205,15 @@ flowchart TD
 
 | Situação | O cliente DEVE |
 |---|---|
-| Antes de baixar | `HEAD /{key}` é **recomendado**, não mais obrigatório — o servidor sempre clampa a resposta, então até o `GET` sem `Range` revela o tamanho total via `Content-Range` (ver §1). Fazer `HEAD` primeiro continua sendo útil pra confirmar existência/`ETag` antes de abrir o arquivo de saída. |
+| Antes de baixar | `HEAD` em `files` é **recomendado**, não mais obrigatório — o servidor sempre clampa a resposta, então até o `GET` sem `Range` revela o tamanho total via `Content-Range` (ver §1). Fazer `HEAD` primeiro continua sendo útil pra confirmar existência/`ETag` antes de abrir o arquivo de saída. |
 | Download | Pedir `Range: bytes={offset}-` (aberto, sem fim) — o servidor decide quanto devolve, sempre dentro do teto configurado (SPEC.md §5/§9). Não precisa (e não deve) calcular um fim de range. Antes de gravar, conferir que o início do `Content-Range` é o offset pedido — um `Range` fora dos formatos aceitos é ignorado e a resposta começa no byte 0. |
 | Tamanho de chunk | **Não é mais escolha do cliente.** O servidor sempre limita a resposta a um teto seguro, independente do que o cliente pede ou não pede. O cliente só precisa avançar pelo tamanho **real** recebido (`len(corpo)`/`Content-Range`) a cada resposta, nunca por um valor fixo pré-calculado. |
-| `404`/`302` no path direto | Seguir o `Location` — já vem resolvido (path real, sem template) e pode ser seguido automaticamente como qualquer redirect HTTP. |
-| `202` no `/fallback/{key}` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita buscas duplicadas na origem. Pode aparecer inclusive na primeira requisição (fallback assíncrono do desenho final). |
-| `302` no `/fallback/{key}` | Seguir o `Location` (path relativo, já inclui o stage) — geralmente volta pro path direto, que agora deve responder `200`/`206`. |
-| `404` no `/fallback/{key}` | Erro **permanente** — o objeto não existe nem na origem simulada. Não adianta repetir. |
-| `403` no path direto | Erro **permanente** — acesso negado à key. Não adianta repetir. |
-| `416` no path direto | Erro **permanente** pro offset pedido — o `Range` começa além do fim do objeto (ex.: arquivo local maior que o remoto). Não repetir o mesmo offset; revalidar tamanho/`ETag` com `HEAD`. |
+| `302` em `files` | Seguir o `Location` — já vem resolvido (path real, sem template) e pode ser seguido automaticamente como qualquer redirect HTTP. |
+| `202` no `retrievals` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita buscas duplicadas na origem. Pode aparecer inclusive na primeira requisição (fallback assíncrono do desenho final). |
+| `302` no `retrievals` | Seguir o `Location` (path relativo, já inclui o stage) — volta pra `files`, que agora deve responder `200`/`206`. |
+| `404` no `retrievals` | Erro **permanente** — o objeto não existe nem na origem simulada. Não adianta repetir. |
+| `403` em `files` | Erro **permanente** — acesso negado à key. Não adianta repetir. |
+| `416` em `files` | Erro **permanente** pro offset pedido — o `Range` começa além do fim do objeto (ex.: arquivo local maior que o remoto). Não repetir o mesmo offset; revalidar tamanho/`ETag` com `HEAD`. |
 | `500`/`502` (qualquer endpoint) | Erro transitório — retry com backoff exponencial (ex.: 1s, 2s, 4s..., com teto e número máximo de tentativas). `502` é o catch-all do path direto pra qualquer status do S3 sem mapeamento próprio. |
 | Timeout de rede | Tratar como erro transitório — retry com backoff, igual a um 500. |
 | Consistência entre chunks | Guardar o `ETag` do `HEAD` inicial e mandar `If-Match: <etag>` em todo `GET` com `Range` — se o arquivo mudar no meio do download, o S3 responde `412 Precondition Failed` (o servidor repassa isso, não mascara como 200). |
@@ -221,7 +232,7 @@ cache-miss, concorrência, `412`, retomada).
   o `Location` já resolvido (ver §1, §3), qualquer cliente HTTP padrão
   que segue `302` sozinho (`curl -L`, browsers, `urllib`/`requests` em
   Python, `net/http` em Go com `CheckRedirect` padrão, etc.) atravessa a
-  cadeia inteira `/{key} → /fallback/{key} → /{key}` sem lógica extra.
+  cadeia inteira `files → retrievals → files` sem lógica extra.
 - **Confirme que a lib preserva os headers da requisição original ao
   seguir o redirect.** A cadeia de cache-miss passa pelo mesmo host, mas
   o cliente precisa continuar mandando `Range`/`If-Match` na requisição
@@ -265,7 +276,7 @@ checar `202`/`412` manualmente a cada requisição:
   abrupta (não é "entrega parcial e avisa"). Isso não é mais problema do
   cliente ter que evitar manualmente — o servidor sempre limita a
   resposta a um teto seguro, mesmo que o cliente peça mais (ver §1).
-- `/fallback/{key}` manda `Cache-Control: max-age` em duas respostas
+- `retrievals` manda `Cache-Control: max-age` em duas respostas
   específicas: o `202` (mesmo valor do `Retry-After` — protege contra
   vários clientes reconsultando a mesma key popular enquanto ela é
   populada) e o `404` definitivo (key não existe nem na origem —

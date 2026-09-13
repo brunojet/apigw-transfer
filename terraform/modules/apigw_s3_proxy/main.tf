@@ -5,8 +5,9 @@
 # e stage. Sem mTLS/autorização nesta rodada (PLAN.md Fases 4-5 adiadas).
 
 # IAM role assumida pelo API Gateway para chamar o S3 diretamente.
-# Escopo: só GetObject/HeadObject no objeto de teste, não no bucket inteiro
-# nem no prefixo /cdn usado pelo media-proxy (PLAN.md Fase 1).
+# Escopo: só GetObject/HeadObject nos prefixos dos canais de entrega
+# ("{fileDeliveryId}/"), não no bucket inteiro nem no prefixo /cdn usado
+# pelo media-proxy (bucket compartilhado).
 resource "aws_iam_role" "apigw_s3" {
   name = "${var.api_name}-apigw-s3-role"
   tags = var.tags
@@ -37,15 +38,9 @@ resource "aws_iam_role_policy" "apigw_s3" {
         Resource = var.bucket_arn
       },
       {
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:HeadObject"]
-        Resource = [
-          "${var.bucket_arn}/${var.object_key}",
-          # Key que nunca existe -- so pra provocar 404 real do S3 (em vez
-          # de 403 por falta de permissao) e validar o mapeamento 404 -> 302.
-          "${var.bucket_arn}/${var.missing_object_key}",
-          "${var.bucket_arn}/${var.fallback_test_object_key}",
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:HeadObject"]
+        Resource = [for id in var.file_delivery_ids : "${var.bucket_arn}/${id}/*"]
       },
     ]
   })
@@ -62,6 +57,7 @@ locals {
     aws_region                 = var.aws_region
     execution_role_arn         = aws_iam_role.apigw_s3.arn
     fallback_lambda_invoke_arn = var.fallback_lambda_invoke_arn
+    file_delivery_ids          = var.file_delivery_ids
   })
 }
 

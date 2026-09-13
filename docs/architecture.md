@@ -28,7 +28,7 @@ compute que uma integração via Lambda implicaria.
 | Componente | Serviço AWS | Responsabilidade |
 | :---- | :---- | :---- |
 | Ponto de entrada | API Gateway (REST API, edge-optimized) | Recebe a requisição HTTP e repassa direto pro S3 via integração de serviço AWS |
-| Integração de download | AWS Service Proxy (`GET`/`HEAD /{key+}`) | Traduz a requisição em `GetObject`/`HeadObject` no S3; uma transformação de requisição (VTL) ajusta/injeta o header `Range` pra nunca ultrapassar o teto de payload |
+| Integração de download | AWS Service Proxy (`GET`/`HEAD /files-delivery/{fileDeliveryId}/files/{fileId}`) | Traduz a requisição em `GetObject`/`HeadObject` no S3; uma transformação de requisição (VTL) ajusta/injeta o header `Range` pra nunca ultrapassar o teto de payload |
 | Armazenamento | Amazon S3 (privado) | Bucket já existente, reaproveitado de um projeto anterior — nunca criado por este projeto |
 | Configuração em runtime | Stage variables do API Gateway | Bucket alvo, teto de tamanho de chunk e tempo de cache de erro — ajustáveis sem novo deployment da API |
 | Cache-miss (fallback) | PoC: AWS Lambda (`cmd/fallback`) com autoinvocação assíncrona. Final: o BFF | Só entra em ação quando o objeto ainda não existe no path direto: responde `202` a todos e copia da origem pro path direto em background (ADR 0001) |
@@ -47,7 +47,7 @@ sequenceDiagram
     participant S3 as S3 (bucket)
 
     loop enquanto offset < total
-        C->>AGW: GET /{key}  Range: bytes=offset-  (aberto)
+        C->>AGW: GET .../files/{fileId}  Range: bytes=offset-  (aberto)
         AGW->>S3: GetObject(key, Range ajustado pelo servidor)
         S3-->>AGW: 206, Content-Range: bytes offset-Y/total
         AGW-->>C: 206, chunk binário (tamanho decidido pelo servidor)
@@ -65,7 +65,7 @@ variante com `HEAD` opcional e os fluxos de cache-miss/concorrência, em
 
 Quando o objeto não existe no path direto, o `404` do S3 é convertido em
 `302` (montado dinamicamente via VTL, sem compute nesse passo) apontando
-para `/fallback/{key}`. Esse endpoint, sim, aciona o serviço de fallback
+para `/files-delivery/{fileDeliveryId}/retrievals/{retrievalId}`. Esse endpoint, sim, aciona o serviço de fallback
 (Lambda nesta implementação — ver §2), que:
 
 1. Confere se o objeto já existe (cópia já terminou) e, se sim, redireciona

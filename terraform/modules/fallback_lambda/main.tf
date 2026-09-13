@@ -1,7 +1,8 @@
-# Lambda de fallback: GET/HEAD /fallback/{key+} responde 202 e dispara a
-# copia origin/{key} -> {key} numa autoinvocacao assincrona (simula o
-# fallback assincrono do BFF, ADR 0001). So invocada em cache-miss -- o
-# path direto (/{key+}) continua 100% sem Lambda.
+# Lambda de fallback: GET/HEAD /files-delivery/{fileDeliveryId}/retrievals/
+# {retrievalId} responde 202 e dispara a copia
+# origin/{fileDeliveryId}/{fileId} -> {fileDeliveryId}/{fileId} numa
+# autoinvocacao assincrona (simula o fallback assincrono do BFF, ADR 0001).
+# So invocada em cache-miss -- as rotas files continuam 100% sem Lambda.
 
 resource "aws_iam_role" "fallback" {
   name = "${var.function_name}-role"
@@ -30,22 +31,25 @@ resource "aws_iam_role_policy" "fallback" {
     Version = "2012-10-17"
     Statement = [
       {
+        # Com ListBucket o S3 responde 404 (e nao 403) para objeto ausente,
+        # o que separa "nao existe na origem" de erro de permissao.
+        Sid      = "ListForNotFound"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = var.bucket_arn
+      },
+      {
         Sid      = "ReadOrigin"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = [for k in var.test_keys : "${var.bucket_arn}/${var.origin_prefix}${k}"]
+        Resource = [for id in keys(var.file_deliveries) : "${var.bucket_arn}/${var.origin_prefix}${id}/*"]
       },
       {
-        Sid      = "ReadWriteDirect"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:HeadObject", "s3:PutObject"]
-        Resource = [for k in var.test_keys : "${var.bucket_arn}/${k}"]
-      },
-      {
-        Sid      = "LockOps"
+        # Arquivos copiados ({id}/{fileId}) e locks ({id}/{fileId}.lock).
+        Sid      = "DeliveryObjectsAndLocks"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = [for k in var.test_keys : "${var.bucket_arn}/${k}.lock"]
+        Resource = [for id in keys(var.file_deliveries) : "${var.bucket_arn}/${id}/*"]
       },
     ]
   })
@@ -71,6 +75,9 @@ resource "aws_lambda_function" "fallback" {
       ORIGIN_PREFIX       = var.origin_prefix
       LOCK_TTL_SECONDS    = tostring(var.lock_ttl_seconds)
       RETRY_AFTER_SECONDS = tostring(var.retry_after_seconds)
+      # {"image":"<cache-control>","apk":"<cache-control>"}: canais aceitos
+      # e o Cache-Control gravado no objeto copiado de cada um.
+      FILE_DELIVERIES = jsonencode({ for id, d in var.file_deliveries : id => d.cache_control })
     }
   }
 

@@ -4,7 +4,7 @@ com Range por bloco. Segue o contrato completo do cliente (ver
 docs/client-behavior.md): o Location do 404 já vem 100% resolvido pelo
 servidor (monta a key real via VTL -- ver módulo apigw_s3_proxy), então
 basta seguir redirect normalmente -- usa o auto-follow padrão do requests
-(path direto -> 302 -> /fallback/{key} -> 302 -> path direto, tudo numa
+(files/{fileId} -> 302 -> retrievals/{fileId} -> 302 -> files/{fileId}, tudo numa
 chamada só). O 202 (lock ocupado no fallback) é tratado de forma
 transparente dentro de request() -- não é um redirect, mas também não
 precisa de lógica especial em quem chama: qualquer HEAD/GET espera o
@@ -46,7 +46,7 @@ Uso:
 
 Sem argumento de URL, usa TEST_URL (constante abaixo, do stage dev atual).
 Se recriar a API (terraform apply muda o rest_api_id), atualize essa constante
-com 'terraform output -raw test_object_url'.
+com a URL de 'terraform output test_file_urls'.
 """
 
 import argparse
@@ -56,7 +56,7 @@ import time
 
 import requests
 
-TEST_URL = "https://7d3q1z0cw9.execute-api.us-east-1.amazonaws.com/dev/servicenow-zurich-platform-security-ptbr.pdf"
+TEST_URL = "https://7d3q1z0cw9.execute-api.us-east-1.amazonaws.com/dev/files-delivery/apk/files/9b1e7d3c5a2f4e6b8c0d1a3e5f7b9c2d"
 
 # Teto de tempo total de espera pelo fallback (não é normativo, só evita
 # ficar rodando pra sempre num teste de debug -- ver docs/client-behavior.md §7).
@@ -121,8 +121,8 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
 def head(url: str, verbose: bool):
     """Único HEAD: descobre tamanho + ETag e, de quebra, resolve a
     disponibilidade -- não precisa de uma etapa separada pra isso. O
-    requests já seguiu os redirects sozinho (path direto -> fallback ->
-    path direto) e request() já absorveu qualquer 202 no caminho; aqui só
+    requests já seguiu os redirects sozinho (files -> retrievals ->
+    files) e request() já absorveu qualquer 202 no caminho; aqui só
     sobra checar 200 vs 404 (permanente) vs algo inesperado."""
     status, headers, body = request(url, "HEAD", verbose)
     if status == 200:

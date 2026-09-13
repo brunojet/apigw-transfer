@@ -27,7 +27,7 @@ module "fallback_lambda" {
   bucket_arn          = data.aws_s3_bucket.media.arn
   bucket_name         = data.aws_s3_bucket.media.id
   origin_prefix       = var.origin_prefix
-  test_keys           = [var.fallback_test_object_key]
+  file_deliveries     = var.file_deliveries
   lock_ttl_seconds    = var.fallback_lock_ttl_seconds
   retry_after_seconds = var.fallback_retry_after_seconds
   timeout             = var.fallback_lambda_timeout
@@ -42,9 +42,7 @@ module "apigw_s3_proxy" {
   aws_region                    = var.aws_region
   bucket_name                   = data.aws_s3_bucket.media.id
   bucket_arn                    = data.aws_s3_bucket.media.arn
-  object_key                    = var.test_object_key
-  missing_object_key            = var.missing_object_key
-  fallback_test_object_key      = var.fallback_test_object_key
+  file_delivery_ids             = keys(var.file_deliveries)
   binary_media_types            = var.binary_media_types
   minimum_compression_size      = var.minimum_compression_size
   max_chunk_bytes               = var.max_chunk_bytes

@@ -24,9 +24,11 @@ variable "origin_prefix" {
   default     = "origin/"
 }
 
-variable "test_keys" {
-  description = "Keys as quais a IAM role tem permissao (escopo minimo, nao o bucket inteiro) -- ver PLAN.md/memoria de projeto"
-  type        = list(string)
+variable "file_deliveries" {
+  description = "Canais de entrega por fileDeliveryId (ex.: image, apk), com o Cache-Control gravado no objeto ao copiar. Definem tambem os prefixos com permissao no S3"
+  type = map(object({
+    cache_control = string
+  }))
 }
 
 variable "memory_size" {

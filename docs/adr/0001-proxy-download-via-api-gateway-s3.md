@@ -39,9 +39,24 @@ binário?
 
 Usar **API Gateway (REST API) com integração AWS Service Proxy direta ao
 S3** — sem Lambda nem aplicação no caminho de um objeto já existente no
-bucket. Três elementos centrais:
+bucket. O contrato segue o padrão de rotas da companhia (entidade e
+identificador alternados):
 
-1. **Download em range sempre limitado pelo servidor.** O `GET /{key+}`
+```
+GET/HEAD /files-delivery/{fileDeliveryId}/files/{fileId}
+GET/HEAD /files-delivery/{fileDeliveryId}/retrievals/{retrievalId}
+```
+
+- `fileDeliveryId`: canal de entrega (`image`, `apk`); junto com o `fileId`
+  forma a key no S3 (`{fileDeliveryId}/{fileId}`).
+- `fileId`: identificador imutável do arquivo (hoje, o `sys_id` do anexo
+  no ServiceNow).
+- `retrievalId`: a busca do arquivo na origem; igual ao `fileId` (no
+  máximo uma busca por arquivo).
+
+Três elementos centrais:
+
+1. **Download em range sempre limitado pelo servidor.** O `GET .../files/{fileId}`
    ajusta/injeta o header `Range` antes de repassar ao S3 via uma
    transformação de requisição (VTL), garantindo que nenhuma resposta
    ultrapasse o teto rígido de payload do API Gateway (10 MB) —
@@ -53,7 +68,7 @@ bucket. Três elementos centrais:
 2. **Fallback assíncrono só no cache-miss, executado pelo BFF.** Quando o
    objeto ainda não existe no path direto, o servidor responde `302`
    (montado dinamicamente via VTL, sem compute nesse primeiro passo)
-   apontando para `/fallback/{key}`, que aciona o fallback — a única vez
+   apontando para `.../retrievals/{retrievalId}`, que aciona o fallback — a única vez
    que compute entra no caminho, e só para popular o cache, nunca para
    servir um objeto já presente. Na solução final quem executa é o
    **próprio BFF**, que já fala com o ServiceNow: ele dispara a cópia em
