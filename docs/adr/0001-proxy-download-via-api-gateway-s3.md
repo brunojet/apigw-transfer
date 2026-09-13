@@ -188,17 +188,19 @@ O que o modelo considera:
 
 Leitura geral:
 
-- **Custo marginal por GB é equivalente** nas duas opções sob demanda
-  (~$0,09 x ~$0,085 na primeira faixa). Requisições, leituras no S3 e
-  authorizer somam centavos por milhar de downloads.
-- **Em volume baixo, o free tier de 1 TB do CloudFront pesa** na
-  comparação: com os valores de exemplo da planilha (~1,8 TB/mês), o API
-  Gateway sai ~$165/mês contra ~$62/mês no CloudFront sob demanda, e a
-  diferença de ~$100/mês é basicamente o free tier. Em volumes maiores a
-  razão se aproxima de 1.
-- **Em volume alto, os planos fixos de CDN abrem distância** (ex.: Pro a
-  $15/mês até 50 TB) — vantagem que a variante CDN não consegue usar hoje
-  pela exigência de validação online (ver "Alternativas consideradas").
+- **Sob demanda, a diferença é pequena.** Nas duas opções ~98% da conta é
+  transferência de dados; requisições, S3 e authorizer somam dezenas de
+  dólares. Com a estimativa inicial da planilha (~30 TB/mês, dominado por
+  APKs): API Gateway ~$2.680/mês contra CloudFront ~$2.410/mês (1,11x).
+- **A região muda o vencedor.** O API Gateway cobra pela região da API
+  (us-east-1: $0,09/GB); o CloudFront, pela região do edge que atende o
+  usuário (América do Sul: $0,11/GB). Com usuários no Brasil, o mesmo
+  volume sai ~$3.140/mês no CloudFront — o API Gateway fica ~15% mais
+  barato.
+- **Plano fixo de CDN seria muito mais barato** (o volume cabe no Pro,
+  $15/mês até 50 TB), mas não foi verificado se o plano atende os
+  requisitos, e a variante CDN esbarra na validação online exigida pela
+  governança (ver "Alternativas consideradas").
 
 ## Alternativas consideradas
 
