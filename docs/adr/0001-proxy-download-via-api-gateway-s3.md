@@ -171,8 +171,9 @@ calcula o custo mensal deste padrão e de uma CDN a partir do volume medido
 em produção: na aba **Consumo**, informe os dias cobertos e, por categoria
 de arquivo, downloads, tamanho médio, % com `HEAD` e % de requisições
 extras; o resultado sai na aba **Comparativo**. Preços e parâmetros ficam
-na aba **Premissas** (us-east-1, conferidos em 2026-09-13 — revisar para a
-região e a data da decisão).
+na aba **Premissas** (API Gateway, S3 e Lambda em **sa-east-1**, região de
+produção escolhida pela latência; CloudFront com usuários na América do
+Sul; preços conferidos em 2026-09-13 — revisar na data da decisão).
 
 O que o modelo considera:
 
@@ -188,15 +189,14 @@ O que o modelo considera:
 
 Leitura geral:
 
-- **Sob demanda, a diferença é pequena.** Nas duas opções ~98% da conta é
-  transferência de dados; requisições, S3 e authorizer somam dezenas de
-  dólares. Com a estimativa inicial da planilha (~30 TB/mês, dominado por
-  APKs): API Gateway ~$2.680/mês contra CloudFront ~$2.410/mês (1,11x).
-- **A região muda o vencedor.** O API Gateway cobra pela região da API
-  (us-east-1: $0,09/GB); o CloudFront, pela região do edge que atende o
-  usuário (América do Sul: $0,11/GB). Com usuários no Brasil, o mesmo
-  volume sai ~$3.140/mês no CloudFront — o API Gateway fica ~15% mais
-  barato.
+- **A conta é dominada pela transferência de dados** (~99% nas duas
+  opções); requisições, S3 e authorizer somam dezenas de dólares.
+- **Em sa-east-1 o API Gateway custa mais.** A saída de dados de São Paulo
+  custa $0,150/GB na primeira faixa, contra $0,110/GB nos edges do
+  CloudFront na América do Sul. Com a estimativa inicial da planilha
+  (~30 TB/mês, dominado por APKs): API Gateway ~$4.380/mês contra
+  CloudFront ~$3.140/mês (~1,4x). É o custo da exigência de governança
+  (validação online), não uma escolha técnica.
 - **Plano fixo de CDN seria muito mais barato** (o volume cabe no Pro,
   $15/mês até 50 TB), mas não foi verificado se o plano atende os
   requisitos, e a variante CDN esbarra na validação online exigida pela
