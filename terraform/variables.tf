@@ -87,15 +87,15 @@ variable "fallback_lambda_function_name" {
 }
 
 variable "fallback_lambda_timeout" {
-  description = "Timeout da Lambda de fallback (segundos)"
+  description = "Timeout da Lambda de fallback (segundos) -- limita a duracao da copia assincrona"
   type        = number
-  default     = 30
+  default     = 300
 }
 
 variable "fallback_lock_ttl_seconds" {
-  description = "TTL do lock distribuido (segundos)"
+  description = "TTL do lock distribuido (segundos) -- deve ser >= fallback_lambda_timeout"
   type        = number
-  default     = 20
+  default     = 360
 }
 
 variable "fallback_retry_after_seconds" {

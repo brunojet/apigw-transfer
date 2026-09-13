@@ -1,7 +1,7 @@
-# Lambda de fallback: GET/HEAD /fallback/{key+} -> busca no prefixo
-# "origin/" do mesmo bucket (origem simulada) -> copia pro path direto ->
-# redireciona. So invocada em cache-miss -- o path direto (/{key+})
-# continua 100% sem Lambda (PLAN.md / memoria de projeto).
+# Lambda de fallback: GET/HEAD /fallback/{key+} responde 202 e dispara a
+# copia origin/{key} -> {key} numa autoinvocacao assincrona (simula o
+# fallback assincrono do BFF, ADR 0001). So invocada em cache-miss -- o
+# path direto (/{key+}) continua 100% sem Lambda.
 
 resource "aws_iam_role" "fallback" {
   name = "${var.function_name}-role"
@@ -73,4 +73,36 @@ resource "aws_lambda_function" "fallback" {
       RETRY_AFTER_SECONDS = tostring(var.retry_after_seconds)
     }
   }
+
+  lifecycle {
+    precondition {
+      condition     = var.lock_ttl_seconds >= var.timeout
+      error_message = "lock_ttl_seconds deve ser >= timeout: senao o lock expira com a copia assincrona ainda em andamento e outra requisicao dispara uma copia duplicada."
+    }
+  }
+}
+
+# A requisicao do API Gateway dispara a copia invocando a propria funcao
+# de forma assincrona (InvocationType Event).
+resource "aws_iam_role_policy" "self_invoke" {
+  name = "${var.function_name}-self-invoke"
+  role = aws_iam_role.fallback.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = aws_lambda_function.fallback.arn
+    }]
+  })
+}
+
+# Sem retry automatico da invocacao assincrona: a copia libera o lock ao
+# terminar (com ou sem erro), entao um retry rodaria sem lock. O cliente
+# reenvia a requisicao e uma nova copia e' disparada.
+resource "aws_lambda_function_event_invoke_config" "fallback" {
+  function_name                = aws_lambda_function.fallback.function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 300
 }
