@@ -146,13 +146,16 @@ S3 responde 206 Partial Content + Content-Range
 API Gateway repassa a resposta ao cliente
 ```
 
-O cliente é responsável por:
-1. Fazer `HEAD` primeiro para descobrir o tamanho total.
-2. Sempre pedir em ranges limitados (nunca um `GET` sem `Range` para
-   objetos que podem ultrapassar o teto de payload — ver seção 5).
-3. Repetir o passo 2 até cobrir o objeto inteiro.
+O servidor limita todo `GET /{key+}` a um teto seguro (§9), então o
+cliente é responsável só por:
+1. Pedir `Range: bytes={offset}-` (o `HEAD` inicial é opcional — o
+   `Content-Range` da primeira resposta já traz o tamanho total).
+2. Conferir que o `Content-Range` começa no offset pedido e avançar pelo
+   tamanho real recebido.
+3. Repetir até cobrir o objeto inteiro.
 
-Esse é exatamente o padrão já implementado e validado do lado cliente em
+Contrato completo em [docs/client-behavior.md](docs/client-behavior.md).
+O padrão de download em ranges é o mesmo já implementado e validado do lado cliente em
 `go-infra-adapters` (branch `feature/storage-ranges`,
 `pkg/storage/contracts.BucketObject.Range`/`ContentRange`, PoC
 `cmd/s3_range_download`).
@@ -260,7 +263,7 @@ decodifica `Content-Encoding` — ver `docs/client-behavior.md`.
 | CloudFront Signed URLs (padrão do `media-proxy`) | ❌ Não é o padrão aceito pelo conglomerado para exposição de arquivos privados — mantido apenas como referência de arquitetura alternativa |
 | Multi-range por requisição | ❌ Não suportado pelo S3; cada range é uma requisição HTTP separada |
 | Redirect dinâmico do cache-miss via VTL (`$context.responseOverride.header.Location`) | ✅ Escolhida — resolve a key real sem Lambda no caminho do `404` inicial; exige `binary_media_types` restrito (ver §5) e a base do mapeamento como referência dinâmica, não literal |
-| Lambda de fallback com lock **não-bloqueante** (202 + `Retry-After`) | ✅ Escolhida — evita Lambda ocioso esperando outra invocação terminar (custo) e evita que erros de IAM/permissão (`AccessDenied`) sejam mascarados como "concorrência normal"; qualquer erro que não seja literalmente "lock já existe" vira erro real, não retry silencioso |
+| Fallback com lock **não-bloqueante** (202 + `Retry-After`) — Lambda síncrona na PoC; no desenho final, o BFF processa de forma assíncrona e responde `202` a todos, inclusive a quem pegou o lock (ADR 0001) | ✅ Escolhida — evita Lambda ocioso esperando outra invocação terminar (custo) e evita que erros de IAM/permissão (`AccessDenied`) sejam mascarados como "concorrência normal"; qualquer erro que não seja literalmente "lock já existe" vira erro real, não retry silencioso |
 | Consistência entre chunks via `If-Match`/`ETag` (S3 nativo) | ✅ Escolhida — sem custo adicional (S3 já valida `If-Match` se enviado); evita concatenar bytes de versões diferentes do mesmo objeto se ele mudar no meio do download |
 | Compressão (gzip) via `minimum_compression_size = 8192` | ✅ Habilitada, mas **opt-in** (só ativa se o cliente mandar `Accept-Encoding`) — validado empiricamente: ~14% de redução real, sem corromper o chunk quando o cliente decodifica `Content-Encoding` corretamente (ver §5) |
 
@@ -302,15 +305,21 @@ assumidas neste documento:
 - **Este projeto substitui o `media-proxy` ou coexiste com ele?** Se
   substituir, precisa considerar migração de clientes já integrados via
   CloudFront Signed URLs.
-- **Escopo de autorização por objeto:** o token do banco carrega
+- **Escopo de autorização por objeto:** ~~o token do banco carrega
   claims que restringem quais paths/buckets o chamador pode acessar, ou
-  a autorização é binária (autenticado = acesso a tudo no bucket)?
+  a autorização é binária?~~ **Encaminhado:** na versão final, ACLs
+  liberam diretórios específicos do bucket (ver ADR 0001). A PoC não tem
+  autorização.
 
-## 9. Spike — clamp de range reativo no servidor (VTL)
+## 9. Clamp de range reativo no servidor (VTL)
+
+> **Estado atual:** o spike descrito abaixo foi mesclado no `GET /{key+}`
+> e o path `/test-range-clamp/{key+}` foi removido. A validação de formato
+> também mudou depois (ver "Validação do `Range` por regex" no fim desta
+> seção). O texto a seguir preserva o histórico do spike.
 
 Path isolado `GET /test-range-clamp/{key+}` (mesmo bucket/objeto de
-teste, IAM já liberada) — **não usado pelo `/{key+}` de produção**. Testa
-uma ideia complementar à do §4: em vez do cliente precisar saber de
+teste, IAM já liberada). Testava uma ideia complementar à do §4: em vez do cliente precisar saber de
 antemão o tamanho de chunk "certo", o servidor **sempre** ajusta/injeta
 o `Range` antes de repassar ao S3, garantindo que nenhuma resposta passe
 de `range_clamp_max_chunk_bytes + 1` bytes — mesmo que o cliente peça
@@ -389,10 +398,37 @@ resposta de `GET`, não só em `HEAD`, então mesmo se este spike ganhar
 consistência `If-Match` no futuro (hoje fora de escopo), o `ETag` ainda
 poderia ser capturado do primeiro `GET`.
 
-**Isso não vale para o `/{key+}` de produção** — lá, sem `Range` o S3
-devolve o objeto inteiro como `200` (nada o limita), então `HEAD`
-continua sendo a forma segura de descobrir o tamanho sem arriscar puxar
-o objeto inteiro de uma vez e estourar o teto de 10MB (§5). A diferença
-está inteiramente no comportamento de "sempre clampar" deste path — não
-é uma propriedade geral de range downloads, é específica de como este
-spike foi desenhado.
+Com o merge no `/{key+}`, isso passou a valer para o path principal: sem
+`Range`, o `GET` também volta `206` limitado ao teto.
+
+### Validação do `Range` por regex
+
+A primeira versão mesclada fazia `split`/`parseInt` em qualquer entrada:
+sufixo (`bytes=-500`), multi-range (`bytes=0-1,5-9`), `bytes=0-99/1000`
+ou lixo quebravam o VTL e o cliente recebia `500`. Repassar o `Range`
+inválido ao S3 também não serve: como no bug acima, o S3 ignora um
+`Range` que não entende e devolve o objeto inteiro, contornando o clamp.
+
+Validar no OpenAPI não é possível: o API Gateway ignora `pattern` (e
+qualquer atributo além de `name`, `in`, `required`, `type`,
+`description`) em parâmetros de requisição, e a validação de requisição
+só checa presença.
+
+Solução atual: `$rawRange.matches("bytes=\d{1,9}-\d{0,9}")` antes de
+qualquer `parseInt`. Aceita `bytes=N-` e `bytes=N-M`; ausente, qualquer
+outro formato ou fim menor que o início é ignorado (como permite a RFC
+9110) e tratado como `bytes=0-`. `\d{1,9}` mantém início + teto dentro de
+`int` (objetos endereçáveis até ~950 MB). Validado contra AWS real:
+
+| `Range` pedido | `Content-Range` devolvido |
+| :---- | :---- |
+| (ausente) | `bytes 0-8388607/114540033` |
+| `bytes=5555-` | `bytes 5555-8394162/114540033` |
+| `bytes=0-1023` | `bytes 0-1023/114540033` |
+| `bytes=-500`, `bytes=100-50`, `bytes=0-1,5-9`, `bytes=0-99/1000` | `bytes 0-8388607/114540033` |
+| `bytes=200000000-` (além do fim) | `416` com corpo JSON genérico |
+
+Mapeamento de status do `GET`: `200`, `206`, `403`, `404` (→ `302`),
+`412`, `416` explícitos e `default` → `502`. Antes o `default` mapeava
+para `200`, e 403/416/5xx do S3 chegavam ao cliente como `200` com o XML
+de erro no corpo (expondo conta e ARN da role).

@@ -31,7 +31,7 @@ compute que uma integração via Lambda implicaria.
 | Integração de download | AWS Service Proxy (`GET`/`HEAD /{key+}`) | Traduz a requisição em `GetObject`/`HeadObject` no S3; uma transformação de requisição (VTL) ajusta/injeta o header `Range` pra nunca ultrapassar o teto de payload |
 | Armazenamento | Amazon S3 (privado) | Bucket já existente, reaproveitado de um projeto anterior — nunca criado por este projeto |
 | Configuração em runtime | Stage variables do API Gateway | Bucket alvo, teto de tamanho de chunk e tempo de cache de erro — ajustáveis sem novo deployment da API |
-| Cache-miss (fallback) | Compute a critério da implementação (esta PoC usa AWS Lambda, `cmd/fallback`) | Só entra em ação quando o objeto ainda não existe no path direto: busca numa origem simulada, copia pro path direto e redireciona de volta. O desenho não exige Lambda especificamente — ECS, EKS ou qualquer outro compute preenchem o mesmo papel |
+| Cache-miss (fallback) | PoC: AWS Lambda síncrona (`cmd/fallback`). Final: o BFF, assíncrono | Só entra em ação quando o objeto ainda não existe no path direto: busca na origem, copia pro path direto. Na PoC redireciona de volta ao fim da cópia; no desenho final responde `202` a todos enquanto copia em background (ADR 0001) |
 | Origem simulada | Amazon S3 (mesmo bucket, prefixo `origin/`) | Substitui uma origem externa real pra fins de PoC |
 | Concorrência | Lock não-bloqueante no S3 | Evita múltiplas execuções do fallback buscarem o mesmo objeto ao mesmo tempo; quem perde a corrida recebe `202` + `Retry-After` |
 | Permissão de acesso ao S3 | IAM Role de execução do API Gateway | Escopada só aos objetos de teste, não ao bucket inteiro |
@@ -80,15 +80,16 @@ resposta vira `412` em vez de misturar bytes de duas versões.
 
 ## 5. Cache negativo (proteção contra retentativas)
 
-Duas respostas do serviço de fallback carregam `Cache-Control: max-age`,
-ambas com o valor vindo de stage variables (ajustável sem redeploy):
+Duas respostas do serviço de fallback carregam `Cache-Control: max-age`:
 
-- **`202`** (lock ocupado): usa o mesmo valor do `Retry-After` — protege
+- **`202`** (lock ocupado): usa o mesmo valor do `Retry-After` (na PoC,
+  variável de ambiente `RETRY_AFTER_SECONDS` da Lambda) — protege
   contra vários clientes reconsultando a mesma key popular enquanto ela
   está sendo populada (mitiga estouro de manada sem infraestrutura de
   cache adicional).
 - **`404`** definitivo (objeto não existe nem na origem simulada): erro
-  irrecuperável sem intervenção humana — cacheável com segurança.
+  irrecuperável sem intervenção humana — cacheável com segurança. O valor
+  vem da stage variable `notFoundMaxAgeSeconds` (ajustável sem redeploy).
 
 Erros transitórios (falha de lock por permissão, falha de upload) **não**
 carregam esse header de propósito — cachear uma falha transitória
@@ -115,7 +116,8 @@ foi deixada pra quando houver dado de uso real (ver ADR 0001).
   ultrapassá-lo falharia abruptamente; é justamente o que o clamp
   reativo do servidor existe para evitar.
 - Multi-range numa única requisição não é suportado (limitação do S3).
-- Sem cache de CDN adicional — o S3 já é a fonte da verdade; adicionar
-  uma camada de cache foi avaliado e descartado para o cenário de
-  bloqueio síncrono de requisição (ver discussão registrada no PLAN.md).
+- Sem cache de CDN adicional — o S3 já é a fonte da verdade. O stage
+  cache nativo do API Gateway foi avaliado e adiado (custo, ver ADR 0001).
+- Objetos endereçáveis até ~950 MB: a validação do `Range` aceita até 9
+  dígitos no início do intervalo.
 - mTLS e a validação do token do banco permanecem em aberto — ver ADR 0001.

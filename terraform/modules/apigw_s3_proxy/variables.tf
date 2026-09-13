@@ -35,9 +35,8 @@ variable "missing_object_key" {
 }
 
 variable "binary_media_types" {
-  description = "Binary media types da REST API"
+  description = "Binary media types da REST API -- content-types reais servidos (nem vazio, nem \"*/*\"; ver SPEC.md secao 5)"
   type        = list(string)
-  default     = []
 }
 
 variable "minimum_compression_size" {

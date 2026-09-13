@@ -48,21 +48,40 @@ bucket. Três elementos centrais:
    independente do que o cliente peça ou deixe de pedir. O cliente só
    precisa reagir ao `Content-Range` da resposta e continuar pedindo até
    cobrir o objeto inteiro; não precisa saber nem calcular um tamanho de
-   bloco.
-2. **Fallback assíncrono só no cache-miss.** Quando o objeto ainda não
-   existe no path direto, o servidor responde `302` (montado
-   dinamicamente via VTL, sem compute nesse primeiro passo) apontando
-   para `/fallback/{key}`, que aí sim aciona um serviço de fallback — a
-   única vez que compute entra no caminho, e só para popular o cache,
-   nunca para servir um objeto já presente. Esse serviço pode ser
-   qualquer solução de compute (Lambda, ECS, EKS, ou outra) — o desenho
-   não depende de qual; esta PoC usa Lambda (invocação esporádica,
-   compatível com o modelo de custo por evento), documentado em
-   `cmd/fallback`.
+   bloco. O formato do `Range` é validado por regex (`bytes=N-` ou
+   `bytes=N-M`); qualquer outro é ignorado e tratado como `bytes=0-`.
+2. **Fallback assíncrono só no cache-miss, executado pelo BFF.** Quando o
+   objeto ainda não existe no path direto, o servidor responde `302`
+   (montado dinamicamente via VTL, sem compute nesse primeiro passo)
+   apontando para `/fallback/{key}`, que aciona o fallback — a única vez
+   que compute entra no caminho, e só para popular o cache, nunca para
+   servir um objeto já presente. Na solução final quem executa é o
+   **próprio BFF**, que já fala com o ServiceNow: ele dispara a cópia em
+   background e responde `202` + `Retry-After` **a todos, inclusive a
+   quem pegou o lock**. O API Gateway só recebe respostas imediatas,
+   então o tamanho do arquivo e a lentidão da origem não esbarram no
+   timeout de integração (29 s); quanto esperar fica a cargo do cliente.
+   O lock no S3 evita cópias duplicadas; seu TTL precisa cobrir a cópia
+   mais longa esperada e é o que libera a key se o processo morrer sem
+   liberar o lock. Esta PoC usa uma Lambda síncrona (`cmd/fallback`)
+   apenas para validar o fluxo.
 3. **Configuração via stage variables, não hardcoded no contrato.** Bucket
    alvo, teto de chunk e tempo de cache de erros ficam em variáveis do
    stage do API Gateway, não embutidas no corpo da API — ajustá-los não
    dispara um novo deployment.
+
+## Premissas
+
+- **Conteúdo imutável por `sys_id`.** O ServiceNow não troca o conteúdo
+  de um anexo mantendo o mesmo `sys_id`: uma alteração gera outro
+  registro. Com o `sys_id` na key, o objeto copiado para o S3 nunca fica
+  desatualizado e não há invalidação de cache a fazer.
+- **Autorização por diretório.** Na versão final, ACLs liberam
+  diretórios específicos do bucket para cada consumidor. A PoC não tem
+  autorização.
+- **URLs assinadas não são aceitas pela política atual** (nem CloudFront
+  Signed URLs nem URLs pré-assinadas do S3) — por isso o acesso passa
+  sempre pelo API Gateway com mTLS e token.
 
 ## Ganhos em relação ao fluxo atual (via ServiceNow)
 
@@ -88,7 +107,10 @@ bucket. Três elementos centrais:
   solução, `Accept-Encoding`/`Content-Encoding` funcionam de ponta a
   ponta (validado empiricamente: ~14% de redução real no objeto de
   teste), sem exigir nada do cliente além de uma lib HTTP que já suporte
-  isso — a maioria suporta, nativamente.
+  isso. Ressalva no Android: o gzip transparente padrão do OkHttp é
+  desligado quando a requisição tem `Range`, então é preciso configurar o
+  `CompressionInterceptor(Gzip)` (OkHttp 5.2+) — ver
+  [docs/examples/OkHttpFallbackInterceptor.kt](../examples/OkHttpFallbackInterceptor.kt).
 - **Maior capacidade e resiliência.** A transferência do binário em si
   não passa pelo ServiceNow — só o cache-miss inicial aciona o fallback
   pra buscar da origem uma vez; toda leitura seguinte do mesmo arquivo
@@ -133,6 +155,11 @@ bucket. Três elementos centrais:
   fonte de bugs sutis específica dessa abordagem (ver SPEC.md §5).
 - Multi-range numa única requisição não é suportado (limitação do S3, não
   desta solução) — cada bloco é sempre uma requisição HTTP separada.
+- Anexo removido no ServiceNow continua disponível no S3 até um processo
+  de limpeza removê-lo — a imutabilidade por `sys_id` resolve alteração,
+  não remoção.
+- Se o processo de fallback morrer sem liberar o lock (queda abrupta do
+  pod, OOM), a key fica respondendo `202` até o TTL do lock expirar.
 
 ## Alternativas consideradas
 
@@ -140,6 +167,8 @@ bucket. Três elementos centrais:
 | :---- | :---- |
 | **API Gateway → S3 direto (Service Proxy)** | ✅ Escolhida — sem compute no caminho de dados, custo mínimo, alinhada ao padrão de API Gateway já consolidado na organização |
 | API Gateway → compute (Lambda/ECS/EKS/etc.) → S3 (proxy integration) | Não escolhida pro caminho de dados — adiciona compute (custo + eventual cold start + limite de payload mais restritivo que o do API GW) sem necessidade, já que não há transformação de binário a fazer. Vale só pro caminho de dados; o fallback (cache-miss) já usa compute de propósito, ver "Decisão" |
+| URL pré-assinada do S3 entregue pelo BFF | Não aceita pela política atual de exposição de arquivos privados, apesar de dispensar o teto de 10 MB e ter range nativo |
+| Fallback síncrono (compute responde `302` ao fim da cópia) | Não escolhido para a solução final — amarra o tempo de cópia ao timeout de integração do API Gateway (29 s); usado só na PoC |
 | Cliente escolhe o tamanho de chunk (proposta inicial) | Substituída — exige o cliente conhecer/sincronizar um número "mágico" com o servidor; o servidor decidir o teto sozinho é mais simples e mais robusto (protege até clientes mal-comportados) |
 | Cache de erro só no CDN automático do API Gateway edge-optimized | Não se aplica — essa distribuição CloudFront é só roteamento de latência, não cacheia por `Cache-Control` (confirmado contra doc oficial). Optou-se por `Cache-Control` no cliente (sem custo) + decisão adiada sobre stage cache nativo do API Gateway (tem custo real, ~$15/mês) |
 

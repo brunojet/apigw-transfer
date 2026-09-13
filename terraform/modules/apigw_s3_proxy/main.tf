@@ -86,8 +86,15 @@ resource "aws_api_gateway_rest_api" "this" {
 resource "aws_api_gateway_deployment" "this" {
   rest_api_id = aws_api_gateway_rest_api.this.id
 
+  # binary_media_types e minimum_compression_size sao atributos da REST API
+  # fora do corpo OpenAPI, mas so valem no stage depois de um novo
+  # deployment -- por isso entram no hash junto com o contrato.
   triggers = {
-    redeployment = sha1(local.openapi_spec)
+    redeployment = sha1(jsonencode({
+      openapi_spec             = local.openapi_spec
+      binary_media_types       = var.binary_media_types
+      minimum_compression_size = var.minimum_compression_size
+    }))
   }
 
   lifecycle {

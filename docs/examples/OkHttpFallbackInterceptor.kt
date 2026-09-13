@@ -1,5 +1,7 @@
 package com.example.apigwtransfer
 
+import okhttp3.CompressionInterceptor
+import okhttp3.Gzip
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -14,6 +16,11 @@ import java.io.IOException
  * Decisao de design: retenta a URL ORIGINAL (nao guarda o /fallback/{key}
  * a parte) -- ela cai de novo no 404->302->fallback ate resolver, igual ao
  * wrapper request() de scripts/download_range.py.
+ *
+ * A espera bloqueia a thread da chamada. Com execute() num worker de
+ * background (ex.: WorkManager) isso e' o esperado; com enqueue() ocupa uma
+ * thread do Dispatcher do OkHttp durante todo o Retry-After. A espera
+ * respeita call.cancel().
  */
 class FallbackRetryInterceptor(
     private val maxWaitMillis: Long = 120_000L,
@@ -34,7 +41,11 @@ class FallbackRetryInterceptor(
                     "202 (lock ocupado) por mais de ${maxWaitMillis / 1000}s -- desistindo"
                 )
             }
-            Thread.sleep(retryAfterSeconds * 1000)
+            val wakeAt = System.currentTimeMillis() + retryAfterSeconds * 1000
+            while (System.currentTimeMillis() < wakeAt) {
+                if (chain.call().isCanceled()) throw IOException("Canceled")
+                Thread.sleep(minOf(250L, wakeAt - System.currentTimeMillis()).coerceAtLeast(1L))
+            }
             response = chain.proceed(request)
         }
         return response
@@ -78,5 +89,11 @@ class PreconditionFailedInterceptor : Interceptor {
 val client = OkHttpClient.Builder()
     .addInterceptor(FallbackRetryInterceptor())
     .addInterceptor(PreconditionFailedInterceptor())
+    // Compressao com Range: o gzip transparente padrao do OkHttp
+    // (BridgeInterceptor) NAO e' ativado quando a requisicao tem header
+    // Range, entao os chunks viriam sem compressao. O CompressionInterceptor
+    // (OkHttp 5.2+) manda Accept-Encoding e descomprime independente do
+    // Range. Em OkHttp 4.x seria preciso um interceptor proprio.
+    .addInterceptor(CompressionInterceptor(Gzip))
     // followRedirects(true) e' o padrao -- nao precisa declarar
     .build()

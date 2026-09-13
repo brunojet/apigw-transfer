@@ -35,9 +35,19 @@ variable "stage_name" {
 }
 
 variable "binary_media_types" {
-  description = "Binary media types da REST API. Lista vazia = respostas binárias vêm em base64 (~+33% de payload); ver SPEC.md §5. Fase 3 testa com e sem."
+  description = "Binary media types da REST API -- os content-types reais servidos. Nao usar \"*/*\": trata tambem o XML de erro do S3 como binario e quebra o VTL (redirect 404 -> 302 e corpos genericos de erro). Lista vazia corrompe o binario. Ver SPEC.md §5."
   type        = list(string)
-  default     = ["*/*"]
+  default = [
+    "application/pdf",
+    "application/octet-stream",
+    "image/*",
+    "application/vnd.android.package-archive",
+  ]
+
+  validation {
+    condition     = length(var.binary_media_types) > 0 && !contains(var.binary_media_types, "*/*")
+    error_message = "binary_media_types precisa listar os content-types reais: vazio corrompe o binario e \"*/*\" quebra o VTL (SPEC.md §5)."
+  }
 }
 
 variable "minimum_compression_size" {
@@ -65,7 +75,7 @@ variable "origin_prefix" {
 }
 
 variable "fallback_test_object_key" {
-  description = "Key de teste para o fluxo de fallback -- ausente na raiz, semeada em origin/ (ver docs/seed-fallback-test-object)"
+  description = "Key de teste para o fluxo de fallback -- ausente na raiz, semeada manualmente em origin/ (aws s3 cp, fora do Terraform)"
   type        = string
   default     = "apigw-transfer-fallback-test.bin"
 }

@@ -22,7 +22,11 @@ servidor é montado.
   quanto devolve por resposta (nunca mais que o teto configurado — ver
   SPEC.md §5/§9). O cliente não escolhe/calcula tamanho de bloco; avança
   pelo tamanho **real** recebido em cada resposta (`Content-Range` ou
-  `len(corpo)`), não por um valor pré-calculado.
+  `len(corpo)`), não por um valor pré-calculado. Formatos aceitos:
+  `bytes=N-` e `bytes=N-M`. Qualquer outro (sufixo `bytes=-N`,
+  multi-range, `bytes=N-M/total`, fim menor que início) é **ignorado** e
+  tratado como `bytes=0-` — o cliente deve conferir que o início do
+  `Content-Range` é o offset pedido antes de gravar o bloco.
 - **Cache-miss:** se `/{key}` responder `404`, o servidor responde `302`
   com um `Location` **já totalmente resolvido** (ex.:
   `/dev/fallback/apigw-transfer-fallback-test.bin`, montado dinamicamente
@@ -32,7 +36,11 @@ servidor é montado.
   não precisa montar nem resolver nada manualmente.
 - **Concorrência:** se `/fallback/{key}` responder `202`, o cliente
   **precisa** respeitar o header `Retry-After` antes de tentar de novo —
-  não é opcional, é o mecanismo que evita custo duplicado de Lambda.
+  não é opcional, é o mecanismo que evita buscas duplicadas na origem. Na
+  PoC o fallback é uma Lambda síncrona (quem pega o lock recebe `302` ao
+  fim da cópia); no desenho final o fallback é assíncrono e responde `202`
+  **a todos, inclusive na primeira requisição** (ver ADR 0001). O cliente
+  deve tratar `202` a qualquer momento da cadeia.
 
 ## 2. Caminho feliz — arquivo já existe
 
@@ -149,14 +157,19 @@ flowchart TD
     B -->|200| C["Content-Length/ETag conhecidos"]
     C --> D["GET /key  Range: bytes=offset-  (aberto)"]
     D --> E{status}
-    E -->|206| F["offset += bytes recebidos"]
+    E -->|206| V{"Content-Range começa em offset?"}
+    V -->|sim| F["offset += bytes recebidos"]
+    V -->|não| P
     F --> G{offset < total?}
     G -->|sim| D
     G -->|não| Z["download completo"]
-    E -->|500 / timeout| H["erro transitório -- retry com backoff"]
+    E -->|5xx / timeout| H["erro transitório -- retry com backoff"]
     H --> D
+    E -->|412| R["objeto mudou -- descarta e recomeça do zero"]
+    E -->|403 / 416| P["erro permanente -- não faz retry"]
+    B -->|403| P
 
-    B -->|302 / 404| I["monta /fallback/key"]
+    B -->|302| I["segue Location (já resolvido pelo servidor)"]
     I --> J["GET /fallback/key"]
     J --> K{status}
     K -->|302| L["segue Location"]
@@ -164,7 +177,7 @@ flowchart TD
     K -->|202| M["espera Retry-After segundos"]
     M --> J
     K -->|404| N["objeto não existe nem na origem -- erro permanente, não faz retry"]
-    K -->|500| H
+    K -->|5xx| H
 ```
 
 ## 6. Regras de comportamento (normativas)
@@ -172,10 +185,10 @@ flowchart TD
 | Situação | O cliente DEVE |
 |---|---|
 | Antes de baixar | `HEAD /{key}` é **recomendado**, não mais obrigatório — o servidor sempre clampa a resposta, então até o `GET` sem `Range` revela o tamanho total via `Content-Range` (ver §1). Fazer `HEAD` primeiro continua sendo útil pra confirmar existência/`ETag` antes de abrir o arquivo de saída. |
-| Download | Pedir `Range: bytes={offset}-` (aberto, sem fim) — o servidor decide quanto devolve, sempre dentro do teto configurado (SPEC.md §5/§9). Não precisa (e não deve) calcular um fim de range. |
+| Download | Pedir `Range: bytes={offset}-` (aberto, sem fim) — o servidor decide quanto devolve, sempre dentro do teto configurado (SPEC.md §5/§9). Não precisa (e não deve) calcular um fim de range. Antes de gravar, conferir que o início do `Content-Range` é o offset pedido — um `Range` fora dos formatos aceitos é ignorado e a resposta começa no byte 0. |
 | Tamanho de chunk | **Não é mais escolha do cliente.** O servidor sempre limita a resposta a um teto seguro, independente do que o cliente pede ou não pede. O cliente só precisa avançar pelo tamanho **real** recebido (`len(corpo)`/`Content-Range`) a cada resposta, nunca por um valor fixo pré-calculado. |
 | `404`/`302` no path direto | Seguir o `Location` — já vem resolvido (path real, sem template) e pode ser seguido automaticamente como qualquer redirect HTTP. |
-| `202` no `/fallback/{key}` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita concorrência desnecessária de Lambda. |
+| `202` no `/fallback/{key}` | **Obrigatório** respeitar o `Retry-After` (segundos) antes de tentar de novo. Não fazer polling mais frequente que isso — é o mecanismo que evita buscas duplicadas na origem. Pode aparecer inclusive na primeira requisição (fallback assíncrono do desenho final). |
 | `302` no `/fallback/{key}` | Seguir o `Location` (path relativo, já inclui o stage) — geralmente volta pro path direto, que agora deve responder `200`/`206`. |
 | `404` no `/fallback/{key}` | Erro **permanente** — o objeto não existe nem na origem simulada. Não adianta repetir. |
 | `403` no path direto | Erro **permanente** — acesso negado à key. Não adianta repetir. |

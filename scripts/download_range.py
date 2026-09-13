@@ -3,14 +3,15 @@
 com Range por bloco. Segue o contrato completo do cliente (ver
 docs/client-behavior.md): o Location do 404 já vem 100% resolvido pelo
 servidor (monta a key real via VTL -- ver módulo apigw_s3_proxy), então
-basta seguir redirect normalmente -- usa o auto-follow padrão do urllib
+basta seguir redirect normalmente -- usa o auto-follow padrão do requests
 (path direto -> 302 -> /fallback/{key} -> 302 -> path direto, tudo numa
 chamada só). O 202 (lock ocupado no fallback) é tratado de forma
 transparente dentro de request() -- não é um redirect, mas também não
 precisa de lógica especial em quem chama: qualquer HEAD/GET espera o
 Retry-After e tenta de novo sozinho. Isso é desacoplado do retry
-específico de chunk em get_range() (que trata erro transitório tipo 500,
-não 202).
+específico de chunk em get_range() (que trata erro transitório -- 5xx,
+timeout, falha de conexão -- não 202). 403/404/416 são permanentes e não
+são retentados.
 
 Tamanho de bloco: o cliente não escolhe mais -- o servidor sempre
 trunca a resposta com segurança (ver openapi.yaml.tftpl e SPEC.md §9),
@@ -61,6 +62,13 @@ TEST_URL = "https://7d3q1z0cw9.execute-api.us-east-1.amazonaws.com/dev/serviceno
 # ficar rodando pra sempre num teste de debug -- ver docs/client-behavior.md §7).
 MAX_FALLBACK_WAIT_SECONDS = 120
 
+# (conexão, leitura) em segundos -- sem timeout o requests pode esperar
+# indefinidamente por uma conexão travada.
+REQUEST_TIMEOUT = (10, 60)
+
+# Status que não mudam repetindo a mesma requisição.
+PERMANENT_STATUSES = {403, 404, 416}
+
 
 def _do_request(url: str, method: str, verbose: bool, headers: dict = None):
     """Uma única tentativa HTTP, sem tratar 202 nem nada -- usada por
@@ -74,7 +82,8 @@ def _do_request(url: str, method: str, verbose: bool, headers: dict = None):
     contrário do urllib.error.HTTPError), então não precisa de try/except
     aqui pra separar sucesso de erro HTTP."""
     t0 = time.time()
-    resp = requests.request(method, url, headers=headers or {}, allow_redirects=True)
+    resp = requests.request(method, url, headers=headers or {}, allow_redirects=True,
+                            timeout=REQUEST_TIMEOUT)
     body = resp.content
     resp_headers = dict(resp.headers)
     status = resp.status_code
@@ -87,7 +96,7 @@ def _do_request(url: str, method: str, verbose: bool, headers: dict = None):
 def request(url: str, method: str, verbose: bool, headers: dict = None):
     """Wrapper de _do_request() que trata 202 (lock ocupado no fallback)
     de forma transparente pra QUALQUER chamada -- não é redirect, então o
-    urllib não ajuda sozinho aqui, mas também não precisa que cada
+    requests não ajuda sozinho aqui, mas também não precisa que cada
     call site saiba disso: espera o Retry-After e repete a MESMA
     requisição, até um teto de tempo. Decisão de design deliberadamente
     desacoplada do retry de chunk em get_range() (que é sobre erro
@@ -97,7 +106,10 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
         status, resp_headers, body = _do_request(url, method, verbose, headers)
         if status != 202:
             return status, resp_headers, body
-        retry_after = int(resp_headers.get("Retry-After", "5"))
+        try:
+            retry_after = int(resp_headers.get("Retry-After", "5"))
+        except ValueError:  # Retry-After também pode vir como data HTTP
+            retry_after = 5
         if time.time() + retry_after > deadline:
             raise RuntimeError(
                 f"202 (lock ocupado) por mais de {MAX_FALLBACK_WAIT_SECONDS}s -- desistindo"
@@ -109,7 +121,7 @@ def request(url: str, method: str, verbose: bool, headers: dict = None):
 def head(url: str, verbose: bool):
     """Único HEAD: descobre tamanho + ETag e, de quebra, resolve a
     disponibilidade -- não precisa de uma etapa separada pra isso. O
-    urllib já seguiu os redirects sozinho (path direto -> fallback ->
+    requests já seguiu os redirects sozinho (path direto -> fallback ->
     path direto) e request() já absorveu qualquer 202 no caminho; aqui só
     sobra checar 200 vs 404 (permanente) vs algo inesperado."""
     status, headers, body = request(url, "HEAD", verbose)
@@ -140,17 +152,41 @@ def get_range(url: str, start: int, etag: str, retries: int, retry_delay: float,
     attempt = 0
     while True:
         attempt += 1
-        status, headers, body = request(url, "GET", verbose, headers=req_headers)
+        try:
+            status, headers, body = request(url, "GET", verbose, headers=req_headers)
+        except requests.RequestException as e:
+            # Timeout/falha de conexão: transitório, mesmo tratamento de um 5xx.
+            if attempt > retries:
+                raise RuntimeError(f"bloco a partir de bytes={start}: erro de rede após "
+                                   f"{attempt} tentativas: {e}") from e
+            print(f"  bytes={start}- -> {type(e).__name__} (tentativa {attempt}/{retries + 1}), "
+                  f"retry em {retry_delay}s...")
+            time.sleep(retry_delay)
+            continue
         if status == 412:
             raise RuntimeError(
                 "arquivo mudou durante o download (If-Match falhou, 412) -- "
                 "rode de novo pra recomeçar do zero com a versão atual"
             )
+        if status in PERMANENT_STATUSES:
+            raise RuntimeError(f"bloco a partir de bytes={start}: HTTP {status} é permanente, "
+                               f"sem retry: {body[:300]!r}")
         if status == 206 or attempt > retries:
             return status, body, headers, attempt
         print(f"  bytes={start}- -> HTTP {status} (tentativa {attempt}/{retries + 1}), "
               f"retry em {retry_delay}s...")
         time.sleep(retry_delay)
+
+
+def _content_range_start(headers: dict):
+    """Início do Content-Range ("bytes A-B/TOTAL" -> A), ou None se ausente/inválido."""
+    value = headers.get("Content-Range", "")
+    if not value.startswith("bytes ") or "-" not in value:
+        return None
+    try:
+        return int(value[len("bytes "):].split("-", 1)[0])
+    except ValueError:
+        return None
 
 
 def _etag_sidecar(out_path: str) -> str:
@@ -215,6 +251,13 @@ def download(url: str, out_path: str, retries: int, retry_delay: float, verbose:
             if len(body) == 0:
                 raise RuntimeError(f"resposta 206 com corpo vazio a partir de bytes={start} -- "
                                     f"abortando pra evitar loop infinito")
+            # O servidor ignora um Range que não entende e devolve a partir do
+            # byte 0 (ver openapi.yaml.tftpl). Gravar isso no offset atual
+            # corromperia o arquivo -- confere antes de escrever.
+            got_start = _content_range_start(headers)
+            if got_start != start:
+                raise RuntimeError(f"pedido bytes={start}-, mas o servidor devolveu "
+                                    f"Content-Range={content_range} -- abortando")
             f.write(body)
             start += len(body)
 
@@ -236,7 +279,7 @@ def main():
 
     try:
         download(args.url, args.output, args.retries, args.retry_delay, args.verbose)
-    except RuntimeError as e:
+    except (RuntimeError, requests.RequestException) as e:
         print(f"ERRO: {e}")
         sys.exit(1)
 
