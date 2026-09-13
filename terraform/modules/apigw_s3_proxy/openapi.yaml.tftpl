@@ -94,28 +94,29 @@ paths:
             #set($Integer = 0)
             #set($maxChunk = $Integer.parseInt($stageVariables.maxChunkBytes))
             #set($rawRange = $input.params('Range'))
-            #if($rawRange && $rawRange != "")
-              #set($rangeBody = $rawRange.replaceAll("bytes=", ""))
-              #set($parts = $rangeBody.split("-"))
-              #set($rangeStart = $Integer.parseInt($parts.get(0).trim()))
-              #if($parts.size() > 1 && $parts.get(1) && $parts.get(1).trim() != "")
-                #set($clientEnd = $Integer.parseInt($parts.get(1).trim()))
-                #set($safeEnd = $rangeStart + $maxChunk)
-                #if($clientEnd > $safeEnd)
-                  #set($rangeEnd = $safeEnd)
-                #else
-                  #set($rangeEnd = $clientEnd)
-                #end
-              #else
-                ## "bytes=N-" sem fim definido -> aplica limite a partir do inicio
-                #set($rangeEnd = $rangeStart + $maxChunk)
+            ## Formatos aceitos: "bytes=N-" e "bytes=N-M", validados por regex
+            ## antes de qualquer parseInt. Ausente ou qualquer outro formato
+            ## (sufixo "-N", multi-range, "/total", lixo) e' ignorado, como
+            ## manda a RFC 9110, e tratado como "bytes=0-". Repassar um Range
+            ## invalido nao adianta: o S3 o ignora e devolve o objeto inteiro,
+            ## contornando o clamp. \d{1,9} mantem inicio + maxChunk dentro de
+            ## int (enderecavel ate ~950MB).
+            #if(!$rawRange || !$rawRange.matches("bytes=\d{1,9}-\d{0,9}"))
+              #set($rawRange = "bytes=0-")
+            #end
+            ## split com limite -1 preserva o fim vazio de "bytes=N-"
+            #set($parts = $rawRange.substring(6).split("-", -1))
+            #set($rangeStart = $Integer.parseInt($parts.get(0)))
+            #set($rangeEnd = $rangeStart + $maxChunk)
+            #if($parts.get(1) != "")
+              #set($clientEnd = $Integer.parseInt($parts.get(1)))
+              #if($clientEnd < $rangeStart)
+                ## "bytes=100-50" e' invalido (fim < inicio) -> mesmo tratamento
+                #set($rangeStart = 0)
+                #set($rangeEnd = $maxChunk)
+              #elseif($clientEnd < $rangeEnd)
+                #set($rangeEnd = $clientEnd)
               #end
-            #else
-              ## Sem header Range -> assume inicio 0 com limite seguro.
-              ## Todo GET agora sempre vem clampado -- 200 (objeto
-              ## inteiro) vira inalcancavel por design (ver responses acima).
-              #set($rangeStart = 0)
-              #set($rangeEnd = $maxChunk)
             #end
             ## $rangeStart-$rangeEnd (sem chaves) NAO funciona: Velocity
             ## aceita hifen em nome de referencia, entao "$rangeStart-"
